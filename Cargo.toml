@@ -1,0 +1,10 @@
+[package]
+name = "willcrock"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fastcgi = "1"
+
+[profile.release]
+strip = true
