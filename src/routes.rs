@@ -1,14 +1,14 @@
 use crate::auth::{self, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
-use crate::{mail, pages};
+use crate::{log, mail, pages};
 use rusqlite::Connection;
 
 pub fn handle(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> Resp {
     match dispatch(conn, cfg, req, now) {
         Ok(resp) => resp,
         Err(e) => {
-            eprintln!("request failed: {e}");
+            log::error(&format!("request failed: {e}"));
             Resp::html(500, pages::error())
         }
     }
@@ -105,7 +105,7 @@ fn post_login(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite:
     let email = req.form.get("email").map(String::as_str).unwrap_or("");
     if let Some((to, code)) = auth::request_code(conn, email, now)? {
         if let Err(e) = mail::send_code(&cfg.smtp, &to, &code) {
-            eprintln!("send login code failed: {e}");
+            log::error(&format!("send login code failed: {e}"));
         }
     }
     Ok(Resp::redirect(&format!(

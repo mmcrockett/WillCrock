@@ -1,4 +1,4 @@
-use crate::{auth, config, db};
+use crate::{auth, config, db, mail};
 use std::process::exit;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,13 +14,22 @@ fn fail(msg: impl std::fmt::Display) -> ! {
     exit(1)
 }
 
-const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable <email>]";
+const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable <email> | mail-test <address>]";
 
 pub fn migrate() {
     let cfg = config::load().unwrap_or_else(|e| fail(e));
     let mut conn = db::open(&cfg.db_path).unwrap_or_else(|e| fail(e));
     let applied = db::migrate(&mut conn).unwrap_or_else(|e| fail(e));
     println!("migrations applied: {applied}");
+}
+
+pub fn mail_test(args: &[String]) {
+    let Some(to) = args.first() else { fail(USAGE) };
+    let cfg = config::load().unwrap_or_else(|e| fail(e));
+    match mail::send_code(&cfg.smtp, to, "TEST1234") {
+        Ok(()) => println!("sent to {to}"),
+        Err(e) => fail(format!("send failed: {e}")),
+    }
 }
 
 pub fn user(args: &[String]) {

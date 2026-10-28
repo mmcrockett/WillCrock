@@ -25,7 +25,7 @@ pub fn load() -> Result<Config, String> {
 }
 
 // Apache starts FastCGI processes without HOME, so fall back to the passwd entry.
-fn home_dir() -> Result<String, String> {
+pub fn home_dir() -> Result<String, String> {
     if let Ok(home) = std::env::var("HOME") {
         return Ok(home);
     }
