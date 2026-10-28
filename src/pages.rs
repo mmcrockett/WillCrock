@@ -8,43 +8,88 @@ pub fn esc(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-fn layout(title: &str, body: &str) -> String {
+fn shell(title: &str, body: &str) -> String {
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>{}</title></head><body><h1>{}</h1>{}</body></html>",
-        esc(title),
+         <title>{} - WillCrock</title>\
+         <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">\
+         <link rel=\"stylesheet\" href=\"/static/bootstrap.min.css\"></head>\
+         <body class=\"bg-body-tertiary\">{}</body></html>",
         esc(title),
         body
     )
 }
 
+fn card_page(title: &str, body: &str) -> String {
+    shell(
+        title,
+        &format!(
+            "<main class=\"container min-vh-100 d-flex flex-column justify-content-center py-4\" style=\"max-width:26rem\">\
+             <p class=\"text-center fs-3 fw-semibold mb-3\">WillCrock</p>\
+             <div class=\"card shadow-sm\"><div class=\"card-body p-4\">\
+             <h1 class=\"h4 mb-3\">{}</h1>{}</div></div></main>",
+            esc(title),
+            body
+        ),
+    )
+}
+
+fn app_page(title: &str, user: &User, body: &str) -> String {
+    let who = user.name.as_deref().unwrap_or(&user.email);
+    let users_link = if user.is_admin {
+        "<li class=\"nav-item\"><a class=\"nav-link\" href=\"/admin/users\">Users</a></li>"
+    } else {
+        ""
+    };
+    shell(
+        title,
+        &format!(
+            "<nav class=\"navbar navbar-expand bg-body border-bottom\"><div class=\"container\">\
+             <a class=\"navbar-brand fw-semibold\" href=\"/\">WillCrock</a>\
+             <ul class=\"navbar-nav me-auto\">{users_link}</ul>\
+             <span class=\"navbar-text me-3 d-none d-sm-inline\">{}</span>\
+             <form method=\"post\" action=\"/logout\" class=\"m-0\">\
+             <button class=\"btn btn-sm btn-outline-secondary\">Sign out</button></form>\
+             </div></nav>\
+             <main class=\"container py-4\"><h1 class=\"h3 mb-4\">{}</h1>{}</main>",
+            esc(who),
+            esc(title),
+            body
+        ),
+    )
+}
+
 pub fn login(msg: Option<&str>) -> String {
-    layout(
+    card_page(
         "Sign in",
         &format!(
             "{}<form method=\"post\" action=\"/login\">\
-             <label>Email <input type=\"email\" name=\"email\" required autofocus></label> \
-             <button>Send code</button></form>",
-            msg.map(|m| format!("<p>{}</p>", esc(m)))
+             <div class=\"mb-3\"><label class=\"form-label\" for=\"email\">Email</label>\
+             <input class=\"form-control form-control-lg\" id=\"email\" type=\"email\" name=\"email\" \
+             autocomplete=\"email\" required autofocus></div>\
+             <button class=\"btn btn-primary btn-lg w-100\">Send code</button></form>",
+            msg.map(|m| format!("<div class=\"alert alert-info\">{}</div>", esc(m)))
                 .unwrap_or_default()
         ),
     )
 }
 
 pub fn code(email: &str, error: bool) -> String {
-    layout(
+    card_page(
         "Enter code",
         &format!(
-            "{}<p>If {} is on the list, a code is on its way.</p>\
+            "{}<p class=\"text-body-secondary\">If {} is on the list, a code is on its way.</p>\
              <form method=\"post\" action=\"/login/code\">\
              <input type=\"hidden\" name=\"email\" value=\"{}\">\
-             <label>Code <input name=\"code\" required autofocus autocomplete=\"one-time-code\" \
-             autocapitalize=\"characters\" maxlength=\"12\"></label> \
-             <button>Sign in</button></form>\
-             <p><a href=\"/login\">Start over</a></p>",
+             <div class=\"mb-3\"><label class=\"form-label\" for=\"code\">Code</label>\
+             <input class=\"form-control form-control-lg text-center font-monospace\" id=\"code\" name=\"code\" \
+             required autofocus autocomplete=\"one-time-code\" autocapitalize=\"characters\" \
+             maxlength=\"12\" placeholder=\"XXXX-XXXX\"></div>\
+             <button class=\"btn btn-primary btn-lg w-100\">Sign in</button></form>\
+             <p class=\"text-center mt-3 mb-0\"><a href=\"/login\">Start over</a></p>",
             if error {
-                "<p>That code didn't work.</p>"
+                "<div class=\"alert alert-danger\">That code didn't work.</div>"
             } else {
                 ""
             },
@@ -56,69 +101,88 @@ pub fn code(email: &str, error: bool) -> String {
 
 pub fn home(user: &User) -> String {
     let who = user.name.as_deref().unwrap_or(&user.email);
-    layout(
-        "WillCrock",
+    app_page(
+        "Home",
+        user,
         &format!(
-            "<p>Hello {}.</p>{}\
-             <form method=\"post\" action=\"/logout\"><button>Sign out</button></form>",
-            esc(who),
-            if user.is_admin {
-                "<p><a href=\"/admin/users\">Manage users</a></p>"
-            } else {
-                ""
-            }
+            "<div class=\"card shadow-sm\"><div class=\"card-body\">Hello {}.</div></div>",
+            esc(who)
         ),
     )
 }
 
-pub fn admin_users(users: &[User], me: i64) -> String {
+pub fn admin_users(users: &[User], me: &User) -> String {
     let rows: String = users
         .iter()
         .map(|u| {
-            let actions = if u.id == me {
-                "(you)".to_string()
+            let actions = if u.id == me.id {
+                "<span class=\"text-body-secondary\">you</span>".to_string()
             } else {
                 let (state_path, state_label) = if u.disabled {
                     ("enable", "Enable")
                 } else {
                     ("disable", "Disable")
                 };
-                let admin_label = if u.is_admin { "Remove admin" } else { "Make admin" };
+                let admin_label = if u.is_admin {
+                    "Remove admin"
+                } else {
+                    "Make admin"
+                };
                 format!(
-                    "<form method=\"post\" action=\"/admin/users/{id}/{state_path}\" style=\"display:inline\"><button>{state_label}</button></form> \
-                     <form method=\"post\" action=\"/admin/users/{id}/admin\" style=\"display:inline\"><button>{admin_label}</button></form>",
+                    "<form method=\"post\" action=\"/admin/users/{id}/{state_path}\" class=\"d-inline\">\
+                     <button class=\"btn btn-sm btn-outline-secondary\">{state_label}</button></form> \
+                     <form method=\"post\" action=\"/admin/users/{id}/admin\" class=\"d-inline\">\
+                     <button class=\"btn btn-sm btn-outline-secondary\">{admin_label}</button></form>",
                     id = u.id
                 )
             };
             format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td>{}<div class=\"text-body-secondary small\">{}</div></td>\
+                 <td>{}{}</td><td class=\"text-end text-nowrap\">{}</td></tr>",
                 esc(&u.email),
                 esc(u.name.as_deref().unwrap_or("")),
-                if u.is_admin { "admin" } else { "" },
-                if u.disabled { "disabled" } else { "" },
+                if u.is_admin {
+                    "<span class=\"badge text-bg-primary\">admin</span> "
+                } else {
+                    ""
+                },
+                if u.disabled {
+                    "<span class=\"badge text-bg-secondary\">disabled</span>"
+                } else {
+                    ""
+                },
                 actions
             )
         })
         .collect();
-    layout(
+    app_page(
         "Users",
+        me,
         &format!(
-            "<p><a href=\"/\">Home</a></p>\
-             <table><tr><th>Email</th><th>Name</th><th></th><th></th><th></th></tr>{rows}</table>\
-             <h2>Add user</h2>\
-             <form method=\"post\" action=\"/admin/users\">\
-             <label>Email <input type=\"email\" name=\"email\" required></label> \
-             <label>Name <input name=\"name\"></label> \
-             <label><input type=\"checkbox\" name=\"is_admin\" value=\"1\"> Admin</label> \
-             <button>Add</button></form>"
+            "<div class=\"card shadow-sm mb-4\"><div class=\"table-responsive\">\
+             <table class=\"table table-hover align-middle mb-0\"><tbody>{rows}</tbody></table>\
+             </div></div>\
+             <div class=\"card shadow-sm\"><div class=\"card-body\">\
+             <h2 class=\"h5 mb-3\">Add user</h2>\
+             <form method=\"post\" action=\"/admin/users\" class=\"row g-2 align-items-center\">\
+             <div class=\"col-12 col-md\"><input class=\"form-control\" type=\"email\" name=\"email\" placeholder=\"Email\" required></div>\
+             <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"name\" placeholder=\"Name\"></div>\
+             <div class=\"col-auto\"><div class=\"form-check\">\
+             <input class=\"form-check-input\" type=\"checkbox\" name=\"is_admin\" value=\"1\" id=\"is_admin\">\
+             <label class=\"form-check-label\" for=\"is_admin\">Admin</label></div></div>\
+             <div class=\"col-auto\"><button class=\"btn btn-primary\">Add</button></div>\
+             </form></div></div>"
         ),
     )
 }
 
 pub fn not_found() -> String {
-    layout("Not found", "<p><a href=\"/\">Home</a></p>")
+    card_page("Not found", "<a href=\"/\">Home</a>")
 }
 
 pub fn error() -> String {
-    layout("Something went wrong", "<p>Try again in a moment.</p>")
+    card_page(
+        "Something went wrong",
+        "<p class=\"mb-0\">Try again in a moment.</p>",
+    )
 }

@@ -98,7 +98,7 @@ fn authed(
 
 fn admin_page(conn: &Connection, me: &User) -> rusqlite::Result<Resp> {
     let users = auth::list_users(conn)?;
-    Ok(Resp::html(200, pages::admin_users(&users, me.id)))
+    Ok(Resp::html(200, pages::admin_users(&users, me)))
 }
 
 fn post_login(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::Result<Resp> {
