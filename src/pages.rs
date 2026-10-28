@@ -13,7 +13,9 @@ fn shell(title: &str, body: &str) -> String {
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
          <title>{} - WillCrock</title>\
+         <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\">\
          <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">\
+         <link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">\
          <link rel=\"stylesheet\" href=\"/static/bootstrap.min.css\"></head>\
          <body class=\"bg-body-tertiary\">{}</body></html>",
         esc(title),
@@ -37,18 +39,12 @@ fn card_page(title: &str, body: &str) -> String {
 
 fn app_page(title: &str, user: &User, body: &str) -> String {
     let who = user.name.as_deref().unwrap_or(&user.email);
-    let users_link = if user.is_admin {
-        "<li class=\"nav-item\"><a class=\"nav-link\" href=\"/admin/users\">Users</a></li>"
-    } else {
-        ""
-    };
     shell(
         title,
         &format!(
             "<nav class=\"navbar navbar-expand bg-body border-bottom\"><div class=\"container\">\
              <a class=\"navbar-brand fw-semibold\" href=\"/\">WillCrock</a>\
-             <ul class=\"navbar-nav me-auto\">{users_link}</ul>\
-             <span class=\"navbar-text me-3 d-none d-sm-inline\">{}</span>\
+             <span class=\"navbar-text ms-auto me-3 d-none d-sm-inline\">{}</span>\
              <form method=\"post\" action=\"/logout\" class=\"m-0\">\
              <button class=\"btn btn-sm btn-outline-secondary\">Sign out</button></form>\
              </div></nav>\
@@ -107,71 +103,6 @@ pub fn home(user: &User) -> String {
         &format!(
             "<div class=\"card shadow-sm\"><div class=\"card-body\">Hello {}.</div></div>",
             esc(who)
-        ),
-    )
-}
-
-pub fn admin_users(users: &[User], me: &User) -> String {
-    let rows: String = users
-        .iter()
-        .map(|u| {
-            let actions = if u.id == me.id {
-                "<span class=\"text-body-secondary\">you</span>".to_string()
-            } else {
-                let (state_path, state_label) = if u.disabled {
-                    ("enable", "Enable")
-                } else {
-                    ("disable", "Disable")
-                };
-                let admin_label = if u.is_admin {
-                    "Remove admin"
-                } else {
-                    "Make admin"
-                };
-                format!(
-                    "<form method=\"post\" action=\"/admin/users/{id}/{state_path}\" class=\"d-inline\">\
-                     <button class=\"btn btn-sm btn-outline-secondary\">{state_label}</button></form> \
-                     <form method=\"post\" action=\"/admin/users/{id}/admin\" class=\"d-inline\">\
-                     <button class=\"btn btn-sm btn-outline-secondary\">{admin_label}</button></form>",
-                    id = u.id
-                )
-            };
-            format!(
-                "<tr><td>{}<div class=\"text-body-secondary small\">{}</div></td>\
-                 <td>{}{}</td><td class=\"text-end text-nowrap\">{}</td></tr>",
-                esc(&u.email),
-                esc(u.name.as_deref().unwrap_or("")),
-                if u.is_admin {
-                    "<span class=\"badge text-bg-primary\">admin</span> "
-                } else {
-                    ""
-                },
-                if u.disabled {
-                    "<span class=\"badge text-bg-secondary\">disabled</span>"
-                } else {
-                    ""
-                },
-                actions
-            )
-        })
-        .collect();
-    app_page(
-        "Users",
-        me,
-        &format!(
-            "<div class=\"card shadow-sm mb-4\"><div class=\"table-responsive\">\
-             <table class=\"table table-hover align-middle mb-0\"><tbody>{rows}</tbody></table>\
-             </div></div>\
-             <div class=\"card shadow-sm\"><div class=\"card-body\">\
-             <h2 class=\"h5 mb-3\">Add user</h2>\
-             <form method=\"post\" action=\"/admin/users\" class=\"row g-2 align-items-center\">\
-             <div class=\"col-12 col-md\"><input class=\"form-control\" type=\"email\" name=\"email\" placeholder=\"Email\" required></div>\
-             <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"name\" placeholder=\"Name\"></div>\
-             <div class=\"col-auto\"><div class=\"form-check\">\
-             <input class=\"form-check-input\" type=\"checkbox\" name=\"is_admin\" value=\"1\" id=\"is_admin\">\
-             <label class=\"form-check-label\" for=\"is_admin\">Admin</label></div></div>\
-             <div class=\"col-auto\"><button class=\"btn btn-primary\">Add</button></div>\
-             </form></div></div>"
         ),
     )
 }
