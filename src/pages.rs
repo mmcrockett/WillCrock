@@ -1,4 +1,6 @@
 use crate::auth::User;
+use crate::config::Quackr;
+use crate::sms::{self, Sms};
 
 pub fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -56,6 +58,8 @@ const ICON_USERS: &str = "<path d=\"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2\"/
     <path d=\"M16 3.1a4 4 0 0 1 0 7.8\"/>";
 const ICON_LOGOUT: &str =
     "<path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"/><path d=\"m16 17 5-5-5-5\"/><path d=\"M21 12H9\"/>";
+const ICON_SMS: &str =
+    "<path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/>";
 const ICON_MENU: &str = "<path d=\"M4 6h16M4 12h16M4 18h16\"/>";
 
 fn icon(paths: &str) -> String {
@@ -93,7 +97,7 @@ fn side_link(href: &str, label: &str, paths: &str, is_active: bool) -> String {
     )
 }
 
-fn app_page(title: &str, active: &str, user: &User, body: &str) -> String {
+fn app_page(title: &str, active: &str, user: &User, has_sms: bool, body: &str) -> String {
     let who = user.name.as_deref().unwrap_or(&user.email);
     let initial: String = who
         .chars()
@@ -108,6 +112,9 @@ fn app_page(title: &str, active: &str, user: &User, body: &str) -> String {
             ICON_USERS,
             active == "users",
         ));
+        if has_sms {
+            links.push_str(&side_link("/sms", "SMS", ICON_SMS, active == "sms"));
+        }
     }
     shell(
         title,
@@ -193,15 +200,19 @@ pub fn code(email: &str, error: bool) -> String {
     )
 }
 
-pub fn home(user: &User) -> String {
+pub fn home(user: &User, has_sms: bool) -> String {
     let mut tiles = String::new();
     if user.is_admin {
         tiles.push_str(&tile("/admin/users", "Users", ICON_USERS));
+        if has_sms {
+            tiles.push_str(&tile("/sms", "SMS", ICON_SMS));
+        }
     }
     app_page(
         "Home",
         "home",
         user,
+        has_sms,
         &format!(
             "<section class=\"hero\"><h1 class=\"hero-word\">WillCrock</h1>\
              <img src=\"{crest}\" alt=\"WillCrock crest: ID IAM SCIO\" class=\"hero-crest\"></section>\
@@ -211,7 +222,7 @@ pub fn home(user: &User) -> String {
     )
 }
 
-pub fn admin_users(users: &[User], me: &User) -> String {
+pub fn admin_users(users: &[User], me: &User, has_sms: bool) -> String {
     let rows: String = users
         .iter()
         .map(|u| {
@@ -252,6 +263,7 @@ pub fn admin_users(users: &[User], me: &User) -> String {
         "Users",
         "users",
         me,
+        has_sms,
         &format!(
             "{}<div class=\"card shadow-sm mb-4\"><div class=\"table-responsive\">\
              <table class=\"table table-hover align-middle mb-0\"><tbody>{rows}</tbody></table>\
@@ -265,6 +277,56 @@ pub fn admin_users(users: &[User], me: &User) -> String {
              </form></div></div>",
             page_title("Users")
         ),
+    )
+}
+
+pub fn sms(user: &User, quackr: &Quackr, messages: Option<&[Sms]>) -> String {
+    let notice = |text: &str| {
+        format!("<div class=\"card shadow-sm\"><div class=\"card-body\">{text}</div></div>")
+    };
+    let cards = match messages {
+        None => notice("Could not load messages."),
+        Some([]) => notice("No messages."),
+        Some(list) => list.iter().map(sms_card).collect(),
+    };
+    app_page(
+        "SMS",
+        "sms",
+        user,
+        true,
+        &format!(
+            "<div class=\"d-flex align-items-baseline justify-content-between gap-3\">{title}\
+             <a href=\"/sms\">Refresh</a></div>\
+             <p><button type=\"button\" class=\"btn btn-link p-0\" data-copy=\"{raw}\">{shown}</button></p>\
+             {cards}\
+             <script src=\"{js}\" defer></script>",
+            title = page_title("SMS"),
+            raw = esc(&quackr.phone_number),
+            shown = esc(&sms::format_phone(&quackr.phone_number)),
+            js = asset("/static/copy.js"),
+        ),
+    )
+}
+
+fn sms_card(m: &Sms) -> String {
+    let code = sms::extract_code(&m.text)
+        .map(|c| {
+            format!(
+                "<button type=\"button\" class=\"btn btn-primary btn-lg w-100 mt-2 sms-code\" \
+                 data-copy=\"{}\">{}</button>",
+                esc(&c.chars().filter(char::is_ascii_digit).collect::<String>()),
+                esc(&c)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "<div class=\"card shadow-sm mb-3\"><div class=\"card-body\">\
+         <div class=\"d-flex justify-content-between gap-2 small text-body-secondary mb-1\">\
+         <span>{}</span><span>{}</span></div>\
+         <div class=\"sms-body\">{}</div>{code}</div></div>",
+        esc(&m.sender),
+        esc(&m.time),
+        esc(&m.text),
     )
 }
 
@@ -295,7 +357,7 @@ mod tests {
 
     #[test]
     fn home_marks_home_active_and_shows_footer() {
-        let html = home(&user(1, "mike", false));
+        let html = home(&user(1, "mike", false), false);
         assert!(html.contains("side-link active\" href=\"/\""));
         assert!(html.contains("class=\"version\""));
         assert!(html.contains("action=\"/logout\""));
@@ -304,29 +366,31 @@ mod tests {
 
     #[test]
     fn users_link_is_admin_only() {
-        assert!(!home(&user(1, "sam", false)).contains("/admin/users"));
-        assert!(home(&user(1, "mike", true)).contains("href=\"/admin/users\""));
+        assert!(!home(&user(1, "sam", false), false).contains("/admin/users"));
+        assert!(home(&user(1, "mike", true), false).contains("href=\"/admin/users\""));
     }
 
     #[test]
     fn admin_page_marks_users_active() {
         let me = user(1, "mike", true);
-        let html = admin_users(std::slice::from_ref(&me), &me);
+        let html = admin_users(std::slice::from_ref(&me), &me, false);
         assert!(html.contains("side-link active\" href=\"/admin/users\""));
     }
 
     #[test]
     fn home_is_a_crest_hero_with_admin_tile() {
-        let member = home(&user(1, "sam", false));
+        let member = home(&user(1, "sam", false), false);
         assert!(member.contains("class=\"hero-crest\""));
         assert!(!member.contains("Hello"));
         assert!(!member.contains("class=\"tile\""));
-        assert!(home(&user(2, "mike", true)).contains("class=\"tile\" href=\"/admin/users\""));
+        assert!(
+            home(&user(2, "mike", true), false).contains("class=\"tile\" href=\"/admin/users\"")
+        );
     }
 
     #[test]
     fn changeable_assets_are_versioned() {
-        let signed_in = home(&user(1, "sam", false));
+        let signed_in = home(&user(1, "sam", false), false);
         let signed_out = login(None);
         for html in [&signed_in, &signed_out] {
             assert!(html.contains("/static/site.css?v="));
@@ -352,12 +416,70 @@ mod tests {
 
     #[test]
     fn version_label_has_a_tooltip() {
-        assert!(home(&user(1, "sam", false)).contains("class=\"version\" title=\""));
+        assert!(home(&user(1, "sam", false), false).contains("class=\"version\" title=\""));
+    }
+
+    fn quackr() -> Quackr {
+        Quackr {
+            phone_number: "15551234567".into(),
+            api_key: "secret".into(),
+        }
+    }
+
+    fn msg(text: &str) -> Sms {
+        Sms {
+            sender: "Bank".into(),
+            time: "Oct 1".into(),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn sms_link_needs_admin_and_config() {
+        let admin = user(1, "mike", true);
+        assert!(!home(&admin, false).contains("/sms"));
+        assert!(!home(&user(2, "sam", false), true).contains("/sms"));
+        let html = home(&admin, true);
+        assert!(html.contains("side-link\" href=\"/sms\""));
+        assert!(html.contains("class=\"tile\" href=\"/sms\""));
+    }
+
+    #[test]
+    fn sms_page_marks_sms_active_and_shows_number() {
+        let html = sms(&user(1, "mike", true), &quackr(), Some(&[]));
+        assert!(html.contains("side-link active\" href=\"/sms\""));
+        assert!(html.contains("(555) 123-4567"));
+        assert!(html.contains("data-copy=\"15551234567\""));
+        assert!(html.contains("/static/copy.js?v="));
+        assert!(html.contains("No messages."));
+        assert!(!html.contains("secret"));
+    }
+
+    #[test]
+    fn sms_page_shows_error_state() {
+        let html = sms(&user(1, "mike", true), &quackr(), None);
+        assert!(html.contains("Could not load messages."));
+    }
+
+    #[test]
+    fn sms_card_has_code_button_only_with_a_code() {
+        let list = [msg("Your code is 123-456"), msg("see you soon")];
+        let html = sms(&user(1, "mike", true), &quackr(), Some(&list));
+        assert_eq!(html.matches("sms-code").count(), 1);
+        assert!(html.contains("data-copy=\"123456\">123-456</button>"));
+    }
+
+    #[test]
+    fn sms_text_is_escaped() {
+        let list = [msg("<script>alert(1)</script>")];
+        let html = sms(&user(1, "mike", true), &quackr(), Some(&list));
+        assert!(!html.contains("<script>alert"));
+        assert!(html.contains("&lt;script&gt;alert(1)"));
     }
 
     #[test]
     fn user_text_is_escaped() {
-        let html = home(&user(1, "<b>x</b>", false));
+        let html = home(&user(1, "<b>x</b>", false), false);
         assert!(!html.contains("<b>x</b>"));
         assert!(html.contains("&lt;b&gt;x&lt;/b&gt;"));
     }

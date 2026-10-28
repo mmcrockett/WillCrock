@@ -257,6 +257,17 @@ body {
   color: var(--crest-navy);
 }
 
+.sms-body {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.sms-code {
+  font-size: 1.6rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
 .topbar,
 .backdrop {
   display: none;

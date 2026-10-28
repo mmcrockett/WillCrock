@@ -5,6 +5,13 @@ use std::os::unix::fs::MetadataExt;
 pub struct Config {
     pub db_path: String,
     pub smtp: Smtp,
+    pub quackr: Option<Quackr>,
+}
+
+#[derive(Deserialize)]
+pub struct Quackr {
+    pub phone_number: String,
+    pub api_key: String,
 }
 
 #[derive(Deserialize)]
