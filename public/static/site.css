@@ -187,6 +187,69 @@ body {
   max-width: 62rem;
 }
 
+.hero {
+  margin: 1rem auto 0;
+  text-align: center;
+}
+
+.hero-word {
+  margin: 0 0 0.5rem;
+  font-family: "Cinzel", Georgia, "Times New Roman", serif;
+  font-size: 2.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--crest-navy);
+}
+
+.hero-crest {
+  width: min(300px, 70vw);
+  height: auto;
+  filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.25));
+}
+
+.tile-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  justify-content: center;
+  margin: 2rem auto 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  width: 112px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--crest-navy);
+  text-decoration: none;
+}
+
+.tile-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  background: #fff;
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.tile-box .icon {
+  width: 44px;
+  height: 44px;
+  stroke-width: 1.75;
+}
+
+.tile:hover .tile-box {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+  transform: translateY(-2px);
+}
+
 .page-title {
   margin-bottom: 1.5rem;
   font-size: 1.6rem;

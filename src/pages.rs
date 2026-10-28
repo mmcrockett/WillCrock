@@ -112,15 +112,25 @@ fn app_page(title: &str, active: &str, user: &User, body: &str) -> String {
              <form method=\"post\" action=\"/logout\">\
              <button class=\"signout\">{logout}Sign out</button></form></div>\
              </aside>\
-             <main class=\"content\"><h1 class=\"page-title\">{title}</h1>{body}</main></div>",
+             <main class=\"content\">{body}</main></div>",
             menu = icon(ICON_MENU),
             version = esc(&version_label()),
             initial = esc(&initial),
             who = esc(who),
             email = esc(&user.email),
             logout = icon(ICON_LOGOUT),
-            title = esc(title),
         ),
+    )
+}
+
+fn page_title(title: &str) -> String {
+    format!("<h1 class=\"page-title\">{}</h1>", esc(title))
+}
+
+fn tile(href: &str, label: &str, paths: &str) -> String {
+    format!(
+        "<a class=\"tile\" href=\"{href}\"><span class=\"tile-box\">{}</span>{label}</a>",
+        icon(paths)
     )
 }
 
@@ -164,14 +174,18 @@ pub fn code(email: &str, error: bool) -> String {
 }
 
 pub fn home(user: &User) -> String {
-    let who = user.name.as_deref().unwrap_or(&user.email);
+    let mut tiles = String::new();
+    if user.is_admin {
+        tiles.push_str(&tile("/admin/users", "Users", ICON_USERS));
+    }
     app_page(
         "Home",
         "home",
         user,
         &format!(
-            "<div class=\"card shadow-sm\"><div class=\"card-body\">Hello {}.</div></div>",
-            esc(who)
+            "<section class=\"hero\"><h1 class=\"hero-word\">WillCrock</h1>\
+             <img src=\"/static/crest.png\" alt=\"WillCrock crest: ID IAM SCIO\" class=\"hero-crest\"></section>\
+             <div class=\"tile-grid\">{tiles}</div>"
         ),
     )
 }
@@ -218,7 +232,7 @@ pub fn admin_users(users: &[User], me: &User) -> String {
         "users",
         me,
         &format!(
-            "<div class=\"card shadow-sm mb-4\"><div class=\"table-responsive\">\
+            "{}<div class=\"card shadow-sm mb-4\"><div class=\"table-responsive\">\
              <table class=\"table table-hover align-middle mb-0\"><tbody>{rows}</tbody></table>\
              </div></div>\
              <div class=\"card shadow-sm\"><div class=\"card-body\">\
@@ -227,7 +241,8 @@ pub fn admin_users(users: &[User], me: &User) -> String {
              <div class=\"col-12 col-md\"><input class=\"form-control\" type=\"email\" name=\"email\" placeholder=\"Email\" required></div>\
              <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"name\" placeholder=\"Name\"></div>\
              <div class=\"col-auto\"><button class=\"btn btn-primary\">Add</button></div>\
-             </form></div></div>"
+             </form></div></div>",
+            page_title("Users")
         ),
     )
 }
@@ -277,6 +292,15 @@ mod tests {
         let me = user(1, "mike", true);
         let html = admin_users(std::slice::from_ref(&me), &me);
         assert!(html.contains("side-link active\" href=\"/admin/users\""));
+    }
+
+    #[test]
+    fn home_is_a_crest_hero_with_admin_tile() {
+        let member = home(&user(1, "sam", false));
+        assert!(member.contains("class=\"hero-crest\""));
+        assert!(!member.contains("Hello"));
+        assert!(!member.contains("class=\"tile\""));
+        assert!(home(&user(2, "mike", true)).contains("class=\"tile\" href=\"/admin/users\""));
     }
 
     #[test]
