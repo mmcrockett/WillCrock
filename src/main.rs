@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod db;
 mod http;
+mod log;
 mod mail;
 mod pages;
 mod routes;
@@ -15,6 +16,7 @@ fn main() {
         None => serve(),
         Some("migrate") => cli::migrate(),
         Some("user") => cli::user(&args[1..]),
+        Some("mail-test") => cli::mail_test(&args[1..]),
         Some(_) => cli::usage_exit(),
     }
 }
@@ -23,7 +25,7 @@ fn serve() {
     let cfg = match config::load() {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            eprintln!("config: {e}");
+            log::error(&format!("config: {e}"));
             std::process::exit(1);
         }
     };
@@ -32,7 +34,7 @@ fn serve() {
         let resp = match db::open(&cfg.db_path) {
             Ok(conn) => routes::handle(&conn, &cfg, &parsed, cli::now()),
             Err(e) => {
-                eprintln!("db open failed: {e}");
+                log::error(&format!("db open failed: {e}"));
                 http::Resp::html(500, pages::error())
             }
         };
