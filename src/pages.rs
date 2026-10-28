@@ -13,9 +13,12 @@ fn shell(title: &str, body: &str) -> String {
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
          <title>{} - WillCrock</title>\
+         <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\">\
          <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">\
-         <link rel=\"stylesheet\" href=\"/static/bootstrap.min.css\"></head>\
-         <body class=\"bg-body-tertiary\">{}</body></html>",
+         <link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">\
+         <link rel=\"stylesheet\" href=\"/static/bootstrap.min.css\">\
+         <link rel=\"stylesheet\" href=\"/static/site.css\"></head>\
+         <body>{}</body></html>",
         esc(title),
         body
     )
@@ -26,7 +29,7 @@ fn card_page(title: &str, body: &str) -> String {
         title,
         &format!(
             "<main class=\"container min-vh-100 d-flex flex-column justify-content-center py-4\" style=\"max-width:26rem\">\
-             <p class=\"text-center fs-3 fw-semibold mb-3\">WillCrock</p>\
+             <img src=\"/static/crest.png\" alt=\"WillCrock crest\" width=\"132\" class=\"d-block mx-auto mb-3\">\
              <div class=\"card shadow-sm\"><div class=\"card-body p-4\">\
              <h1 class=\"h4 mb-3\">{}</h1>{}</div></div></main>",
             esc(title),
@@ -45,12 +48,13 @@ fn app_page(title: &str, user: &User, body: &str) -> String {
     shell(
         title,
         &format!(
-            "<nav class=\"navbar navbar-expand bg-body border-bottom\"><div class=\"container\">\
-             <a class=\"navbar-brand fw-semibold\" href=\"/\">WillCrock</a>\
+            "<nav class=\"navbar navbar-expand navbar-crest\" data-bs-theme=\"dark\"><div class=\"container\">\
+             <a class=\"navbar-brand fw-semibold d-flex align-items-center gap-2\" href=\"/\">\
+             <img src=\"/favicon.svg\" alt=\"\" width=\"34\" height=\"34\">WillCrock</a>\
              <ul class=\"navbar-nav me-auto\">{users_link}</ul>\
              <span class=\"navbar-text me-3 d-none d-sm-inline\">{}</span>\
              <form method=\"post\" action=\"/logout\" class=\"m-0\">\
-             <button class=\"btn btn-sm btn-outline-secondary\">Sign out</button></form>\
+             <button class=\"btn btn-sm btn-outline-light\">Sign out</button></form>\
              </div></nav>\
              <main class=\"container py-4\"><h1 class=\"h3 mb-4\">{}</h1>{}</main>",
             esc(who),
@@ -123,16 +127,9 @@ pub fn admin_users(users: &[User], me: &User) -> String {
                 } else {
                     ("disable", "Disable")
                 };
-                let admin_label = if u.is_admin {
-                    "Remove admin"
-                } else {
-                    "Make admin"
-                };
                 format!(
                     "<form method=\"post\" action=\"/admin/users/{id}/{state_path}\" class=\"d-inline\">\
-                     <button class=\"btn btn-sm btn-outline-secondary\">{state_label}</button></form> \
-                     <form method=\"post\" action=\"/admin/users/{id}/admin\" class=\"d-inline\">\
-                     <button class=\"btn btn-sm btn-outline-secondary\">{admin_label}</button></form>",
+                     <button class=\"btn btn-sm btn-outline-secondary\">{state_label}</button></form>",
                     id = u.id
                 )
             };
@@ -167,9 +164,6 @@ pub fn admin_users(users: &[User], me: &User) -> String {
              <form method=\"post\" action=\"/admin/users\" class=\"row g-2 align-items-center\">\
              <div class=\"col-12 col-md\"><input class=\"form-control\" type=\"email\" name=\"email\" placeholder=\"Email\" required></div>\
              <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"name\" placeholder=\"Name\"></div>\
-             <div class=\"col-auto\"><div class=\"form-check\">\
-             <input class=\"form-check-input\" type=\"checkbox\" name=\"is_admin\" value=\"1\" id=\"is_admin\">\
-             <label class=\"form-check-label\" for=\"is_admin\">Admin</label></div></div>\
              <div class=\"col-auto\"><button class=\"btn btn-primary\">Add</button></div>\
              </form></div></div>"
         ),

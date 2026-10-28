@@ -68,8 +68,7 @@ fn authed(
                     .get("name")
                     .map(|n| n.trim())
                     .filter(|n| !n.is_empty());
-                let is_admin = req.form.contains_key("is_admin");
-                auth::add_user(conn, email, name, is_admin, now)?;
+                auth::add_user(conn, email, name, false, now)?;
             }
             Ok(Resp::redirect("/admin/users"))
         }
@@ -81,12 +80,6 @@ fn authed(
                 match *action {
                     "disable" => auth::set_disabled(conn, id, true, now)?,
                     "enable" => auth::set_disabled(conn, id, false, now)?,
-                    "admin" => {
-                        let target_is_admin = auth::list_users(conn)?
-                            .iter()
-                            .any(|u| u.id == id && u.is_admin);
-                        auth::set_admin(conn, id, !target_is_admin)?
-                    }
                     _ => return Ok(Resp::html(404, pages::not_found())),
                 }
             }

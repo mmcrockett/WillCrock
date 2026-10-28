@@ -24,7 +24,7 @@ jobs:
           mkdir dist
           cp target/x86_64-unknown-linux-musl/release/willcrock dist/willcrock.fcgi
           cp public/.htaccess dist/.htaccess
-          cp public/favicon.svg dist/favicon.svg
+          cp public/favicon.svg public/favicon.ico public/apple-touch-icon.png dist/
           cp -r public/static dist/static
       - uses: actions/upload-artifact@v4
         with:
@@ -57,7 +57,7 @@ jobs:
         run: |
           scp dist/willcrock.fcgi "$REMOTE:willcrock.com/willcrock.fcgi.new"
           scp dist/.htaccess "$REMOTE:willcrock.com/.htaccess.new"
-          scp dist/favicon.svg "$REMOTE:willcrock.com/favicon.svg"
+          scp dist/favicon.svg dist/favicon.ico dist/apple-touch-icon.png "$REMOTE:willcrock.com/"
           scp -r dist/static "$REMOTE:willcrock.com/"
       - name: Swap
         run: |
