@@ -1,10 +1,41 @@
-use std::io::Write;
+mod auth;
+mod cli;
+mod config;
+mod db;
+mod http;
+mod mail;
+mod pages;
+mod routes;
+
+use std::sync::Arc;
 
 fn main() {
-    fastcgi::run(|mut req| {
-        let _ = write!(
-            req.stdout(),
-            "Content-Type: text/html; charset=utf-8\r\n\r\n<h1>hello world</h1>"
-        );
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None => serve(),
+        Some("migrate") => cli::migrate(),
+        Some("user") => cli::user(&args[1..]),
+        Some(_) => cli::usage_exit(),
+    }
+}
+
+fn serve() {
+    let cfg = match config::load() {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            eprintln!("config: {e}");
+            std::process::exit(1);
+        }
+    };
+    fastcgi::run(move |mut req| {
+        let parsed = http::Req::from_fastcgi(&mut req);
+        let resp = match db::open(&cfg.db_path) {
+            Ok(conn) => routes::handle(&conn, &cfg, &parsed, cli::now()),
+            Err(e) => {
+                eprintln!("db open failed: {e}");
+                http::Resp::html(500, pages::error())
+            }
+        };
+        let _ = resp.write_to(&mut req.stdout());
     });
 }

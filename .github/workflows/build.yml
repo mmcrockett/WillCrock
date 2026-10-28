@@ -12,8 +12,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
+          components: clippy, rustfmt
       - run: sudo apt-get install -y musl-tools
       - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
       - run: cargo build --release --target x86_64-unknown-linux-musl
       - name: Stage artifact
         run: |
@@ -25,3 +29,51 @@ jobs:
           name: willcrock-fcgi
           path: dist
           include-hidden-files: true
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    env:
+      REMOTE: ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: willcrock-fcgi
+          path: dist
+      - name: SSH setup
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      - name: Upload
+        run: |
+          scp dist/willcrock.fcgi "$REMOTE:willcrock.com/willcrock.fcgi.new"
+          scp dist/.htaccess "$REMOTE:willcrock.com/.htaccess.new"
+      - name: Swap
+        run: |
+          ssh "$REMOTE" 'bash -s' <<'EOF'
+          set -euo pipefail
+          sha='${{ github.sha }}'
+          cd ~/willcrock.com
+          chmod 755 willcrock.fcgi.new
+          db=~/data/willcrock.com/family.sqlite3
+          backups=~/backups/willcrock.com
+          if [ -f "$db" ]; then
+            mkdir -p "$backups"
+            cp "$db" "$backups/family-$sha.sqlite3"
+            ls -1t "$backups"/family-*.sqlite3 | tail -n +11 | xargs -r rm --
+          fi
+          ./willcrock.fcgi.new migrate
+          [ -f willcrock.fcgi ] && cp willcrock.fcgi willcrock.fcgi.prev
+          mv willcrock.fcgi.new willcrock.fcgi
+          mv .htaccess.new .htaccess
+          pkill -f willcrock.fcgi || true
+          EOF
+      - name: Smoke test
+        run: curl -fsS --retry 5 --retry-delay 3 --retry-all-errors https://willcrock.com/login > /dev/null
