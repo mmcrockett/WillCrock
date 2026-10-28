@@ -28,7 +28,7 @@ fn card_page(title: &str, body: &str) -> String {
         title,
         &format!(
             "<main class=\"container min-vh-100 d-flex flex-column justify-content-center py-4\" style=\"max-width:26rem\">\
-             <p class=\"text-center fs-3 fw-semibold mb-3\">WillCrock</p>\
+             <img src=\"/static/crest.png\" alt=\"WillCrock crest\" width=\"132\" class=\"d-block mx-auto mb-3\">\
              <div class=\"card shadow-sm\"><div class=\"card-body p-4\">\
              <h1 class=\"h4 mb-3\">{}</h1>{}</div></div></main>",
             esc(title),
@@ -48,7 +48,8 @@ fn app_page(title: &str, user: &User, body: &str) -> String {
         title,
         &format!(
             "<nav class=\"navbar navbar-expand bg-body border-bottom\"><div class=\"container\">\
-             <a class=\"navbar-brand fw-semibold\" href=\"/\">WillCrock</a>\
+             <a class=\"navbar-brand fw-semibold d-flex align-items-center gap-2\" href=\"/\">\
+             <img src=\"/favicon.svg\" alt=\"\" width=\"28\" height=\"28\">WillCrock</a>\
              <ul class=\"navbar-nav me-auto\">{users_link}</ul>\
              <span class=\"navbar-text me-3 d-none d-sm-inline\">{}</span>\
              <form method=\"post\" action=\"/logout\" class=\"m-0\">\
