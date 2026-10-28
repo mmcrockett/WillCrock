@@ -11,6 +11,10 @@ jobs:
       WILLCROCK_VERSION: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
+      - name: Build metadata
+        run: |
+          echo "WILLCROCK_COMMIT=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          echo "WILLCROCK_BUILT_AT=$(TZ=America/Chicago date '+%b %-d, %Y %-I:%M %p %Z')" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
