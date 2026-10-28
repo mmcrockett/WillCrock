@@ -16,8 +16,9 @@ fn shell(title: &str, body: &str) -> String {
          <link rel=\"icon\" href=\"/favicon.ico\" sizes=\"48x48\">\
          <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">\
          <link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">\
-         <link rel=\"stylesheet\" href=\"/static/bootstrap.min.css\"></head>\
-         <body class=\"bg-body-tertiary\">{}</body></html>",
+         <link rel=\"stylesheet\" href=\"/static/bootstrap.min.css\">\
+         <link rel=\"stylesheet\" href=\"/static/site.css\"></head>\
+         <body>{}</body></html>",
         esc(title),
         body
     )
@@ -47,13 +48,13 @@ fn app_page(title: &str, user: &User, body: &str) -> String {
     shell(
         title,
         &format!(
-            "<nav class=\"navbar navbar-expand bg-body border-bottom\"><div class=\"container\">\
+            "<nav class=\"navbar navbar-expand navbar-crest\" data-bs-theme=\"dark\"><div class=\"container\">\
              <a class=\"navbar-brand fw-semibold d-flex align-items-center gap-2\" href=\"/\">\
-             <img src=\"/favicon.svg\" alt=\"\" width=\"28\" height=\"28\">WillCrock</a>\
+             <img src=\"/favicon.svg\" alt=\"\" width=\"34\" height=\"34\">WillCrock</a>\
              <ul class=\"navbar-nav me-auto\">{users_link}</ul>\
              <span class=\"navbar-text me-3 d-none d-sm-inline\">{}</span>\
              <form method=\"post\" action=\"/logout\" class=\"m-0\">\
-             <button class=\"btn btn-sm btn-outline-secondary\">Sign out</button></form>\
+             <button class=\"btn btn-sm btn-outline-light\">Sign out</button></form>\
              </div></nav>\
              <main class=\"container py-4\"><h1 class=\"h3 mb-4\">{}</h1>{}</main>",
             esc(who),
