@@ -9,12 +9,12 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-fn fail(msg: impl std::fmt::Display) -> ! {
+pub fn fail(msg: impl std::fmt::Display) -> ! {
     eprintln!("{msg}");
     exit(1)
 }
 
-const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable|enable|admin|unadmin <email> | mail-test <address>]";
+const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable|enable|admin|unadmin <email> | mail-test <address> | pickle sync|reserve-today|reserve|cancel|login]";
 
 pub fn migrate() {
     let cfg = config::load().unwrap_or_else(|e| fail(e));

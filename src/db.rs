@@ -1,7 +1,8 @@
 use rusqlite::Connection;
 use std::time::Duration;
 
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE users (
   id INTEGER PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
@@ -26,7 +27,49 @@ CREATE TABLE sessions (
   last_seen_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );
-"];
+",
+    "
+CREATE TABLE pickle_runs (
+  id INTEGER PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  command TEXT NOT NULL,
+  user TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  summary TEXT,
+  detail TEXT
+);
+CREATE INDEX pickle_runs_started_at ON pickle_runs(started_at);
+CREATE TABLE pickle_requests (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL REFERENCES pickle_runs(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  context TEXT,
+  method TEXT NOT NULL,
+  url TEXT NOT NULL,
+  attempt INTEGER NOT NULL DEFAULT 1,
+  status INTEGER,
+  duration_ms INTEGER,
+  request_body TEXT,
+  response_body TEXT,
+  error TEXT
+);
+CREATE INDEX pickle_requests_run_id ON pickle_requests(run_id);
+CREATE TABLE pickle_bookings (
+  id TEXT PRIMARY KEY,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL,
+  court TEXT,
+  checked_in INTEGER NOT NULL DEFAULT 0,
+  refreshed_at TEXT NOT NULL
+);
+CREATE TABLE pickle_token (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  token TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+",
+];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
