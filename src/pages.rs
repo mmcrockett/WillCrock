@@ -65,6 +65,18 @@ fn icon(paths: &str) -> String {
     )
 }
 
+const COMMIT: Option<&str> = option_env!("WILLCROCK_COMMIT");
+const BUILT_AT: Option<&str> = option_env!("WILLCROCK_BUILT_AT");
+
+fn build_details(commit: Option<&str>, built_at: Option<&str>) -> String {
+    match (commit, built_at) {
+        (Some(c), Some(t)) => format!("Commit {c}, built {t}"),
+        (Some(c), None) => format!("Commit {c}"),
+        (None, Some(t)) => format!("Built {t}"),
+        (None, None) => "Local build".to_string(),
+    }
+}
+
 fn version_label() -> String {
     if !VERSION.is_empty() && VERSION.bytes().all(|b| b.is_ascii_digit()) {
         format!("v{VERSION}")
@@ -111,7 +123,7 @@ fn app_page(title: &str, active: &str, user: &User, body: &str) -> String {
              <a class=\"brand\" href=\"/\"><img src=\"{mark}\" alt=\"\" width=\"48\" height=\"48\">\
              <span class=\"brand-word\">WillCrock</span></a>\
              <nav class=\"side-nav\">{links}</nav>\
-             <div class=\"side-foot\"><div class=\"version\">{version}</div>\
+             <div class=\"side-foot\"><div class=\"version\" title=\"{details}\">{version}</div>\
              <div class=\"user\"><span class=\"avatar\">{initial}</span>\
              <div class=\"user-text\"><div class=\"user-name\">{who}</div>\
              <div class=\"user-email\">{email}</div></div></div>\
@@ -122,6 +134,7 @@ fn app_page(title: &str, active: &str, user: &User, body: &str) -> String {
             menu = icon(ICON_MENU),
             mark = asset("/favicon.svg"),
             version = esc(&version_label()),
+            details = esc(&build_details(COMMIT, BUILT_AT)),
             initial = esc(&initial),
             who = esc(who),
             email = esc(&user.email),
@@ -320,6 +333,26 @@ mod tests {
             assert!(html.contains("/static/crest.png?v="));
         }
         assert!(signed_in.contains("/favicon.svg?v="));
+    }
+
+    #[test]
+    fn build_details_cover_every_combination() {
+        let t = "Oct 28, 2026 3:05 PM CDT";
+        assert_eq!(
+            build_details(Some("abc1234"), Some(t)),
+            "Commit abc1234, built Oct 28, 2026 3:05 PM CDT"
+        );
+        assert_eq!(build_details(Some("abc1234"), None), "Commit abc1234");
+        assert_eq!(
+            build_details(None, Some(t)),
+            "Built Oct 28, 2026 3:05 PM CDT"
+        );
+        assert_eq!(build_details(None, None), "Local build");
+    }
+
+    #[test]
+    fn version_label_has_a_tooltip() {
+        assert!(home(&user(1, "sam", false)).contains("class=\"version\" title=\""));
     }
 
     #[test]
