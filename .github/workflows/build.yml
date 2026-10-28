@@ -62,11 +62,12 @@ jobs:
           sha='${{ github.sha }}'
           cd ~/willcrock.com
           chmod 755 willcrock.fcgi.new
-          db=~/willcrock-data/family.sqlite3
+          db=~/data/willcrock.com/family.sqlite3
+          backups=~/backups/willcrock.com
           if [ -f "$db" ]; then
-            mkdir -p ~/willcrock-data/backups
-            cp "$db" ~/willcrock-data/backups/family-"$sha".sqlite3
-            ls -1t ~/willcrock-data/backups/family-*.sqlite3 | tail -n +11 | xargs -r rm --
+            mkdir -p "$backups"
+            cp "$db" "$backups/family-$sha.sqlite3"
+            ls -1t "$backups"/family-*.sqlite3 | tail -n +11 | xargs -r rm --
           fi
           ./willcrock.fcgi.new migrate
           [ -f willcrock.fcgi ] && cp willcrock.fcgi willcrock.fcgi.prev
