@@ -7,6 +7,7 @@ mod log;
 mod mail;
 mod pages;
 mod routes;
+mod sms;
 
 use std::sync::Arc;
 

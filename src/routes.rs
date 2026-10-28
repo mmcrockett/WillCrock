@@ -1,7 +1,7 @@
 use crate::auth::{self, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
-use crate::{log, mail, pages};
+use crate::{log, mail, pages, sms};
 use rusqlite::Connection;
 
 pub fn handle(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> Resp {
@@ -37,7 +37,7 @@ fn dispatch(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::R
         return Ok(Resp::redirect("/login"));
     };
 
-    let resp = authed(conn, req, &segs, &user, token, now)?;
+    let resp = authed(conn, cfg, req, &segs, &user, token, now)?;
     Ok(if slid {
         resp.header("Set-Cookie", session_cookie(token, SESSION_TTL))
     } else {
@@ -47,6 +47,7 @@ fn dispatch(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::R
 
 fn authed(
     conn: &Connection,
+    cfg: &Config,
     req: &Req,
     segs: &[&str],
     user: &User,
@@ -54,13 +55,14 @@ fn authed(
     now: i64,
 ) -> rusqlite::Result<Resp> {
     match (req.method.as_str(), segs) {
-        ("GET", []) => Ok(Resp::html(200, pages::home(user))),
+        ("GET", []) => Ok(Resp::html(200, pages::home(user, cfg.quackr.is_some()))),
         ("POST", ["logout"]) => {
             auth::logout(conn, token)?;
             Ok(Resp::redirect("/login").header("Set-Cookie", session_cookie("", 0)))
         }
         (_, ["admin", ..]) if !user.is_admin => Ok(Resp::html(404, pages::not_found())),
-        ("GET", ["admin", "users"]) => admin_page(conn, user),
+        ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
+        ("GET", ["sms"]) => Ok(sms_page(cfg, user)),
         ("POST", ["admin", "users"]) => {
             if let Some(email) = req.form.get("email").filter(|e| !e.trim().is_empty()) {
                 let name = req
@@ -89,9 +91,22 @@ fn authed(
     }
 }
 
-fn admin_page(conn: &Connection, me: &User) -> rusqlite::Result<Resp> {
+fn admin_page(conn: &Connection, cfg: &Config, me: &User) -> rusqlite::Result<Resp> {
     let users = auth::list_users(conn)?;
-    Ok(Resp::html(200, pages::admin_users(&users, me)))
+    Ok(Resp::html(
+        200,
+        pages::admin_users(&users, me, cfg.quackr.is_some()),
+    ))
+}
+
+fn sms_page(cfg: &Config, user: &User) -> Resp {
+    let Some(quackr) = cfg.quackr.as_ref().filter(|_| user.is_admin) else {
+        return Resp::html(404, pages::not_found());
+    };
+    let messages = sms::fetch(quackr)
+        .map_err(|e| log::error(&format!("quackr fetch failed: {e}")))
+        .ok();
+    Resp::html(200, pages::sms(user, quackr, messages.as_deref()))
 }
 
 fn post_login(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::Result<Resp> {
