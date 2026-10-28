@@ -37,7 +37,7 @@ fn dispatch(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::R
         return Ok(Resp::redirect("/login"));
     };
 
-    let resp = authed(conn, req, &segs, &user, token)?;
+    let resp = authed(conn, req, &segs, &user, token, now)?;
     Ok(if slid {
         resp.header("Set-Cookie", session_cookie(token, SESSION_TTL))
     } else {
@@ -51,6 +51,7 @@ fn authed(
     segs: &[&str],
     user: &User,
     token: &str,
+    now: i64,
 ) -> rusqlite::Result<Resp> {
     match (req.method.as_str(), segs) {
         ("GET", []) => Ok(Resp::html(200, pages::home(user))),
@@ -58,8 +59,39 @@ fn authed(
             auth::logout(conn, token)?;
             Ok(Resp::redirect("/login").header("Set-Cookie", session_cookie("", 0)))
         }
+        (_, ["admin", ..]) if !user.is_admin => Ok(Resp::html(404, pages::not_found())),
+        ("GET", ["admin", "users"]) => admin_page(conn, user),
+        ("POST", ["admin", "users"]) => {
+            if let Some(email) = req.form.get("email").filter(|e| !e.trim().is_empty()) {
+                let name = req
+                    .form
+                    .get("name")
+                    .map(|n| n.trim())
+                    .filter(|n| !n.is_empty());
+                auth::add_user(conn, email, name, false, now)?;
+            }
+            Ok(Resp::redirect("/admin/users"))
+        }
+        ("POST", ["admin", "users", id, action]) => {
+            let Ok(id) = id.parse::<i64>() else {
+                return Ok(Resp::html(404, pages::not_found()));
+            };
+            if id != user.id {
+                match *action {
+                    "disable" => auth::set_disabled(conn, id, true, now)?,
+                    "enable" => auth::set_disabled(conn, id, false, now)?,
+                    _ => return Ok(Resp::html(404, pages::not_found())),
+                }
+            }
+            Ok(Resp::redirect("/admin/users"))
+        }
         _ => Ok(Resp::html(404, pages::not_found())),
     }
+}
+
+fn admin_page(conn: &Connection, me: &User) -> rusqlite::Result<Resp> {
+    let users = auth::list_users(conn)?;
+    Ok(Resp::html(200, pages::admin_users(&users, me)))
 }
 
 fn post_login(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::Result<Resp> {
