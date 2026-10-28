@@ -8,6 +8,10 @@ pub fn esc(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+fn asset(path: &str) -> String {
+    format!("{path}?v={VERSION}")
+}
+
 fn shell(title: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
@@ -17,10 +21,11 @@ fn shell(title: &str, body: &str) -> String {
          <link rel=\"icon\" href=\"/favicon.svg\" type=\"image/svg+xml\">\
          <link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\">\
          <link rel=\"stylesheet\" href=\"/static/bootstrap.min.css\">\
-         <link rel=\"stylesheet\" href=\"/static/site.css\"></head>\
+         <link rel=\"stylesheet\" href=\"{css}\"></head>\
          <body>{}</body></html>",
         esc(title),
-        body
+        body,
+        css = asset("/static/site.css"),
     )
 }
 
@@ -29,11 +34,12 @@ fn card_page(title: &str, body: &str) -> String {
         title,
         &format!(
             "<main class=\"container min-vh-100 d-flex flex-column justify-content-center py-4\" style=\"max-width:26rem\">\
-             <img src=\"/static/crest.png\" alt=\"WillCrock crest\" width=\"132\" class=\"d-block mx-auto mb-3\">\
+             <img src=\"{crest}\" alt=\"WillCrock crest\" width=\"132\" class=\"d-block mx-auto mb-3\">\
              <div class=\"card shadow-sm\"><div class=\"card-body p-4\">\
              <h1 class=\"h4 mb-3\">{}</h1>{}</div></div></main>",
             esc(title),
-            body
+            body,
+            crest = asset("/static/crest.png"),
         ),
     )
 }
@@ -98,11 +104,11 @@ fn app_page(title: &str, active: &str, user: &User, body: &str) -> String {
              <div class=\"app\">\
              <header class=\"topbar\">\
              <label for=\"nav-toggle\" class=\"topbar-btn\" aria-label=\"Menu\">{menu}</label>\
-             <img src=\"/favicon.svg\" alt=\"\" width=\"32\" height=\"32\">\
+             <img src=\"{mark}\" alt=\"\" width=\"32\" height=\"32\">\
              <span class=\"brand-word\">WillCrock</span></header>\
              <label for=\"nav-toggle\" class=\"backdrop\"></label>\
              <aside class=\"sidebar\">\
-             <a class=\"brand\" href=\"/\"><img src=\"/favicon.svg\" alt=\"\" width=\"48\" height=\"48\">\
+             <a class=\"brand\" href=\"/\"><img src=\"{mark}\" alt=\"\" width=\"48\" height=\"48\">\
              <span class=\"brand-word\">WillCrock</span></a>\
              <nav class=\"side-nav\">{links}</nav>\
              <div class=\"side-foot\"><div class=\"version\">{version}</div>\
@@ -114,6 +120,7 @@ fn app_page(title: &str, active: &str, user: &User, body: &str) -> String {
              </aside>\
              <main class=\"content\">{body}</main></div>",
             menu = icon(ICON_MENU),
+            mark = asset("/favicon.svg"),
             version = esc(&version_label()),
             initial = esc(&initial),
             who = esc(who),
@@ -184,8 +191,9 @@ pub fn home(user: &User) -> String {
         user,
         &format!(
             "<section class=\"hero\"><h1 class=\"hero-word\">WillCrock</h1>\
-             <img src=\"/static/crest.png\" alt=\"WillCrock crest: ID IAM SCIO\" class=\"hero-crest\"></section>\
-             <div class=\"tile-grid\">{tiles}</div>"
+             <img src=\"{crest}\" alt=\"WillCrock crest: ID IAM SCIO\" class=\"hero-crest\"></section>\
+             <div class=\"tile-grid\">{tiles}</div>",
+            crest = asset("/static/crest.png"),
         ),
     )
 }
@@ -301,6 +309,17 @@ mod tests {
         assert!(!member.contains("Hello"));
         assert!(!member.contains("class=\"tile\""));
         assert!(home(&user(2, "mike", true)).contains("class=\"tile\" href=\"/admin/users\""));
+    }
+
+    #[test]
+    fn changeable_assets_are_versioned() {
+        let signed_in = home(&user(1, "sam", false));
+        let signed_out = login(None);
+        for html in [&signed_in, &signed_out] {
+            assert!(html.contains("/static/site.css?v="));
+            assert!(html.contains("/static/crest.png?v="));
+        }
+        assert!(signed_in.contains("/favicon.svg?v="));
     }
 
     #[test]
