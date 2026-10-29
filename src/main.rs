@@ -6,6 +6,7 @@ mod http;
 mod log;
 mod mail;
 mod pages;
+mod pickle;
 mod routes;
 mod sms;
 
@@ -18,6 +19,7 @@ fn main() {
         Some("migrate") => cli::migrate(),
         Some("user") => cli::user(&args[1..]),
         Some("mail-test") => cli::mail_test(&args[1..]),
+        Some("pickle") => pickle::run(&args[1..]),
         Some(_) => cli::usage_exit(),
     }
 }

@@ -6,12 +6,42 @@ pub struct Config {
     pub db_path: String,
     pub smtp: Smtp,
     pub quackr: Option<Quackr>,
+    #[serde(default)]
+    pub pickle: Option<Pickle>,
 }
 
 #[derive(Deserialize)]
 pub struct Quackr {
     pub phone_number: String,
     pub api_key: String,
+}
+
+#[derive(Deserialize)]
+pub struct Pickle {
+    pub full_name: String,
+    pub member_id: String,
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub schedule: Vec<ScheduleEntry>,
+}
+
+#[derive(Deserialize)]
+pub struct ScheduleEntry {
+    pub day: String,
+    pub start: String,
+    #[serde(default = "default_duration")]
+    pub duration: i64,
+    #[serde(default = "default_court")]
+    pub court: String,
+}
+
+fn default_duration() -> i64 {
+    90
+}
+
+fn default_court() -> String {
+    "any".to_string()
 }
 
 #[derive(Deserialize)]
@@ -54,7 +84,21 @@ fn passwd_home(passwd: &str, uid: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::passwd_home;
+    use super::*;
+
+    #[test]
+    fn pickle_section_is_optional_and_defaults_the_schedule() {
+        let base =
+            "db_path = \"x\"\n[smtp]\nhost=\"h\"\nusername=\"u\"\npassword=\"p\"\nfrom=\"f\"\n";
+        assert!(toml::from_str::<Config>(base).unwrap().pickle.is_none());
+        let with = format!(
+            "{base}[pickle]\nfull_name=\"A B\"\nmember_id=\"1\"\nusername=\"u\"\npassword=\"p\"\n\
+             [[pickle.schedule]]\nday=\"saturday\"\nstart=\"10:00\"\n"
+        );
+        let cfg = toml::from_str::<Config>(&with).unwrap();
+        let entry = &cfg.pickle.unwrap().schedule[0];
+        assert_eq!((entry.duration, entry.court.as_str()), (90, "any"));
+    }
 
     #[test]
     fn finds_home_by_uid() {
