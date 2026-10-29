@@ -18,8 +18,10 @@ const CHECKIN_WINDOW_BEFORE_MIN: f64 = 60.0;
 const CHECKIN_WINDOW_AFTER_MIN: f64 = 150.0;
 const BOOKING_OPEN_HOUR_CENTRAL: i8 = 6;
 const BOOKING_OPEN_MAX_WAIT_SEC: f64 = 600.0;
-const NOT_ELIGIBLE_RETRY_MS: i64 = 20_000;
-const NOT_ELIGIBLE_RETRY_INTERVAL_MS: u64 = 500;
+const MAX_NOT_ELIGIBLE_RETRIES: u32 = 18;
+const FAST_RETRY: Duration = Duration::from_secs(5);
+const SLOW_RETRY: Duration = Duration::from_secs(10);
+const FAST_RETRY_SECS_AFTER_OPEN: i64 = 30;
 
 #[derive(Clone)]
 pub struct BookingInfo {
@@ -110,6 +112,14 @@ fn reserve_body(
 // rather than a distinct status, so it is matched on the message.
 fn not_eligible(resp: &Response) -> bool {
     resp.message().to_lowercase().contains("not eligible")
+}
+
+fn retry_delay(now: Timestamp, fast_until: Timestamp) -> Duration {
+    if now < fast_until {
+        FAST_RETRY
+    } else {
+        SLOW_RETRY
+    }
 }
 
 pub fn pick_checkin(bookings: &[BookingInfo], now: Timestamp) -> Option<&BookingInfo> {
@@ -247,7 +257,10 @@ impl Client<'_> {
             .collect();
 
         if !entries.is_empty() {
-            self.fetch_booking_list("warmup")?;
+            if let Err(e) = self.fetch_booking_list("warmup") {
+                self.detail(format!("warmup failed: {e}"));
+                self.refresh_token()?;
+            }
             self.wait_for_booking_open()?;
         }
         entries
@@ -291,6 +304,9 @@ impl Client<'_> {
         let slot = format!("{} {label}", time::slot_label(start_ts, Some(end_ts)));
         let prefix = if dry_run { "dry run " } else { "" };
 
+        let open_at = time::central_at(self.now(), 0, BOOKING_OPEN_HOUR_CENTRAL, 0)?;
+        let fast_until = time::plus_millis(open_at.timestamp(), FAST_RETRY_SECS_AFTER_OPEN * 1000);
+        let mut retries: u32 = 0;
         let mut last = None;
         for courts in &attempts {
             let body = reserve_body(
@@ -303,8 +319,7 @@ impl Client<'_> {
             println!("rattempt: {}", time::iso(self.now()));
             println!("rrequest: {body}");
 
-            let mut retries = 0;
-            let deadline = time::plus_millis(self.now(), NOT_ELIGIBLE_RETRY_MS);
+            let retries_before = retries;
             let book_path = format!("{API}/appointment/add_book");
             let resp = loop {
                 let req = if dry_run {
@@ -313,19 +328,20 @@ impl Client<'_> {
                     Req::post(&book_path, "reserve", body.clone())
                 };
                 let resp = self.call(&req, 1)?;
-                if !not_eligible(&resp) || self.now() >= deadline {
+                if !not_eligible(&resp) || retries >= MAX_NOT_ELIGIBLE_RETRIES {
                     break resp;
                 }
                 retries += 1;
-                (self.sleep)(Duration::from_millis(NOT_ELIGIBLE_RETRY_INTERVAL_MS));
+                (self.sleep)(retry_delay(self.now(), fast_until));
             };
+            let retried = retries - retries_before;
 
             self.detail(format!(
                 "{}: {}{}",
                 court_name(courts),
                 resp.message(),
-                if retries > 0 {
-                    format!(" (retried {retries}x)")
+                if retried > 0 {
+                    format!(" (retried {retried}x)")
                 } else {
                     String::new()
                 }
@@ -462,25 +478,43 @@ mod tests {
         let (mut c, clock) = client(&fake, &conn, &cfg, MONDAY_6AM);
         c.reserve("07:30", None, Some("5C"), false).unwrap();
 
-        assert_eq!(clock.slept.borrow().len(), 3);
+        assert_eq!(*clock.slept.borrow(), [FAST_RETRY; 3]);
         assert_eq!(c.details, ["5C: ok (retried 3x)"]);
     }
 
     #[test]
-    fn not_eligible_gives_up_after_twenty_seconds() {
+    fn not_eligible_retries_every_5s_until_half_past_then_every_10s_up_to_18() {
         let conn = open_memory();
         let (fake, cfg) = (Fake::default(), cfg());
         with_token(&conn);
         for _ in 0..60 {
             fake.push(400, r#"{"message":"not eligible"}"#);
         }
-        let (mut c, _) = client(&fake, &conn, &cfg, MONDAY_6AM);
+        let (mut c, clock) = client(&fake, &conn, &cfg, MONDAY_6AM);
         let resp = c.reserve("07:30", None, Some("5C"), false).unwrap();
 
         assert_eq!(resp.status, 400);
-        assert_eq!(fake.calls.borrow().len(), 41);
+        assert_eq!(fake.calls.borrow().len(), 19);
+        let mut expected = vec![FAST_RETRY; 6];
+        expected.extend([SLOW_RETRY; 12]);
+        assert_eq!(*clock.slept.borrow(), expected);
         assert!(c.failed);
         assert_eq!(c.notes, ["failed to book Mon Oct 19 7:30-9:00am court 5C"]);
+        assert_eq!(c.details, ["5C: not eligible (retried 18x)"]);
+    }
+
+    #[test]
+    fn the_retry_budget_is_shared_across_courts() {
+        let conn = open_memory();
+        let (fake, cfg) = (Fake::default(), cfg());
+        with_token(&conn);
+        for _ in 0..100 {
+            fake.push(400, r#"{"message":"not eligible"}"#);
+        }
+        let (mut c, _) = client(&fake, &conn, &cfg, MONDAY_6AM);
+        c.reserve("07:30", None, None, false).unwrap();
+
+        assert_eq!(fake.calls.borrow().len(), 22);
     }
 
     #[test]
@@ -543,6 +577,34 @@ mod tests {
             ]
         );
         assert_eq!(c.notes, ["booked Sat Oct 24 10:00-11:00am court 5C"]);
+    }
+
+    #[test]
+    fn a_failing_warmup_refreshes_the_token_and_still_books() {
+        let conn = open_memory();
+        let (fake, mut cfg) = (Fake::default(), cfg());
+        with_token(&conn);
+        cfg.schedule = vec![crate::config::ScheduleEntry {
+            day: "saturday".into(),
+            start: "10:00".into(),
+            duration: 60,
+            court: "5C".into(),
+        }];
+        for _ in 0..3 {
+            fake.push(500, "boom");
+        }
+        fake.push(200, r#"{"payload":{"token":"fresh"}}"#);
+        fake.push(200, r#"{"message":"ok"}"#);
+        let (mut c, clock) = client(&fake, &conn, &cfg, "2026-10-17T10:55:00Z");
+        c.reserve_today(false).unwrap();
+
+        let paths = fake.paths();
+        assert_eq!(paths[3], "/api/v1/auth/login");
+        assert_eq!(paths[4], "/api/v1/appointment/add_book");
+        assert!(c.details[0].starts_with("warmup failed: request failed after 3 attempts"));
+        assert_eq!(c.notes, ["booked Sat Oct 24 10:00-11:00am court 5C"]);
+        assert!(!c.failed);
+        assert_eq!(clock.slept.borrow().last(), Some(&Duration::from_secs(294)));
     }
 
     #[test]
