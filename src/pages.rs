@@ -467,31 +467,35 @@ fn run_html(run: &dashboard::Run) -> String {
         "error" => "text-bg-danger",
         _ => "text-bg-secondary",
     };
-    let detail = run.detail.as_deref().filter(|d| !d.is_empty());
     let n = run.requests.len();
+    let count = if n > 1 {
+        format!(" <span class=\"text-body-secondary small\">{n} requests</span>")
+    } else {
+        String::new()
+    };
+    let text_class = if run.status == "error" {
+        "text-danger"
+    } else {
+        "text-body-secondary"
+    };
+    let mut body = String::new();
+    for text in [run.summary.as_deref(), run.detail.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|t| !t.is_empty() && *t != run.command)
+    {
+        body.push_str(&format!(
+            "<pre class=\"ms-3 small mb-1 pickle-body {text_class}\">{}</pre>",
+            esc(&dashboard::pretty_message(text))
+        ));
+    }
     let requests: String = run.requests.iter().map(request_html).collect();
     format!(
-        "<details class=\"mb-2\"><summary class=\"h6\"{title}>{when} \
-         <span class=\"badge {badge}\">{status}</span> {what} \
-         <span class=\"text-body-secondary small\">{cmd}, {n} request{s}</span></summary>{detail_html}{requests}</details>",
-        title = detail
-            .map(|d| format!(" title=\"{}\"", esc(d)))
-            .unwrap_or_default(),
+        "<details class=\"mb-2\"><summary class=\"h6\">\
+         <span class=\"badge {badge}\">{status}</span> {cmd} {when}{count}</summary>{body}{requests}</details>",
         when = esc(&dashboard::local(&run.started_at, "%a %-I:%M:%S%P")),
         status = esc(&run.status),
-        what = esc(run
-            .summary
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&run.command)),
         cmd = esc(&run.command),
-        s = if n == 1 { "" } else { "s" },
-        detail_html = detail
-            .map(|d| format!(
-                "<pre class=\"ms-3 small text-body-secondary\">{}</pre>",
-                esc(d)
-            ))
-            .unwrap_or_default(),
     )
 }
 
@@ -551,7 +555,8 @@ pub fn pickle(user: &User, features: Features, data: &Dashboard, now: i64) -> St
              <thead><tr><th>Date</th><th>Time</th><th>Court</th><th>Checked in?</th><th></th></tr></thead>\
              <tbody>{rows}</tbody></table></div></div>\
              <p class=\"text-body-secondary small\">{}</p>\
-             <h2 class=\"h5 pt-3\">History (last {} days)</h2>{history}",
+             <details class=\"pt-3\"><summary class=\"btn btn-sm btn-outline-secondary\">History</summary>\
+             <h2 class=\"h6 pt-3\">Last {} days</h2>{history}</details>",
             page_title("Pickleball"),
             esc(&refreshed),
             dashboard::HISTORY_DAYS,
@@ -894,6 +899,43 @@ mod tests {
         }
         assert!(html.contains("&lt;b&gt;504&lt;/b&gt;"));
         assert!(html.contains("text-bg-danger"));
+    }
+
+    #[test]
+    fn pickle_history_is_collapsed_and_counts_only_multiple_requests() {
+        let req = || dashboard::Request {
+            created_at: "2026-10-18T13:30:00Z".to_string(),
+            context: None,
+            method: "GET".to_string(),
+            url: "/a".to_string(),
+            attempt: 1,
+            status: Some(200),
+            duration_ms: None,
+            request_body: None,
+            response_body: None,
+            error: None,
+        };
+        let run = |n| dashboard::Run {
+            started_at: "2026-10-18T13:30:00Z".to_string(),
+            command: "sync".to_string(),
+            status: "ok".to_string(),
+            summary: None,
+            detail: None,
+            requests: (0..n).map(|_| req()).collect(),
+        };
+        let one = Dashboard {
+            bookings: vec![],
+            runs: vec![run(1)],
+        };
+        let html = pickle(&user(1, "mike", true), pickle_on(), &one, 0);
+        assert!(html.contains(">History</summary>"));
+        assert!(html.contains("Last 7 days"));
+        assert!(!html.contains("1 request"));
+        let many = Dashboard {
+            bookings: vec![],
+            runs: vec![run(6)],
+        };
+        assert!(pickle(&user(1, "mike", true), pickle_on(), &many, 0).contains("6 requests"));
     }
 
     #[test]
