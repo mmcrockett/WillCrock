@@ -67,8 +67,11 @@ const ICON_LOGOUT: &str =
     "<path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"/><path d=\"m16 17 5-5-5-5\"/><path d=\"M21 12H9\"/>";
 const ICON_SMS: &str =
     "<path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/>";
-const ICON_PADDLE: &str = "<circle cx=\"10\" cy=\"10\" r=\"7\"/><path d=\"m15 15 6 6\"/>\
-    <circle cx=\"8\" cy=\"8\" r=\"0.5\"/><circle cx=\"12\" cy=\"8\" r=\"0.5\"/><circle cx=\"10\" cy=\"12\" r=\"0.5\"/>";
+const ICON_PADDLE: &str = "<g transform=\"rotate(45 12 12)\">\
+    <rect x=\"6.5\" y=\"1.5\" width=\"11\" height=\"13\" rx=\"5.5\"/>\
+    <path d=\"M10.5 14.5V21a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6.5\"/>\
+    <circle cx=\"10\" cy=\"6\" r=\"0.6\"/><circle cx=\"14\" cy=\"6\" r=\"0.6\"/>\
+    <circle cx=\"12\" cy=\"9\" r=\"0.6\"/></g>";
 const ICON_MENU: &str = "<path d=\"M4 6h16M4 12h16M4 18h16\"/>";
 
 fn icon(paths: &str) -> String {
