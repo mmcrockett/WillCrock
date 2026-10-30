@@ -100,7 +100,7 @@ fn admin_page(conn: &Connection, cfg: &Config, me: &User) -> rusqlite::Result<Re
 }
 
 fn sms_page(cfg: &Config, user: &User) -> Resp {
-    let Some(quackr) = cfg.quackr.as_ref().filter(|_| user.is_admin) else {
+    let Some(quackr) = cfg.quackr.as_ref() else {
         return Resp::html(404, pages::not_found());
     };
     let messages = sms::fetch(quackr)
