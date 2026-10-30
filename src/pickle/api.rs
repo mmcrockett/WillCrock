@@ -5,12 +5,14 @@ use crate::config;
 use jiff::Timestamp;
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 const BASE_URL: &str = "https://balbuton.com";
 pub const API: &str = "/api/v1";
 const REQUEST_MAX_ATTEMPTS: u32 = 3;
 const BACKOFF_BASE_SEC: u64 = 2;
+const USER_AGENT: &str = "okhttp/4.12.0";
 
 pub type Res<T> = Result<T, String>;
 
@@ -22,6 +24,7 @@ pub fn db_err(e: rusqlite::Error) -> String {
 pub enum Method {
     Get,
     Post,
+    Delete,
 }
 
 impl Method {
@@ -29,6 +32,7 @@ impl Method {
         match self {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Delete => "DELETE",
         }
     }
 }
@@ -74,6 +78,7 @@ impl UreqTransport {
         UreqTransport {
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(30))
+                .user_agent(USER_AGENT)
                 .build(),
         }
     }
@@ -88,16 +93,13 @@ impl Transport for UreqTransport {
         body: Option<&str>,
     ) -> Res<Response> {
         let url = format!("{BASE_URL}{path}");
-        let mut req = match method {
-            Method::Get => self.agent.get(&url),
-            Method::Post => self.agent.post(&url),
-        };
+        let mut req = self.agent.request(method.as_str(), &url);
         for (k, v) in headers {
             req = req.set(k, v);
         }
         let result = match method {
-            Method::Get => req.call(),
             Method::Post => req.send_string(body.unwrap_or("")),
+            Method::Get | Method::Delete => req.call(),
         };
         let resp = match result {
             Ok(r) | Err(ureq::Error::Status(_, r)) => r,
@@ -130,6 +132,13 @@ impl<'b> Req<'b> {
         }
     }
 
+    pub fn delete(path: &'b str, context: &'b str) -> Self {
+        Req {
+            method: Method::Delete,
+            ..Req::get(path, context)
+        }
+    }
+
     pub fn post(path: &'b str, context: &'b str, body: Value) -> Self {
         Req {
             method: Method::Post,
@@ -140,6 +149,24 @@ impl<'b> Req<'b> {
             redact: false,
         }
     }
+}
+
+// The app sends a per-install uuid when logging in; a stable one derived from
+// the member id keeps every login looking like the same device.
+fn device_id(member_id: &str) -> String {
+    let hex: String = Sha256::digest(format!("willcrock-pickle-{member_id}").as_bytes())
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 pub struct Client<'a> {
@@ -224,7 +251,7 @@ impl<'a> Client<'a> {
         let body = json!({
             "username": self.cfg.username,
             "password": self.cfg.password,
-            "front": true,
+            "user_type": "nbu",
         });
         let path = format!("{API}/auth/login");
         let req = Req {
@@ -253,13 +280,12 @@ impl<'a> Client<'a> {
             self.refresh_token()?;
         }
         let token = self.token.clone().unwrap_or_default();
-        let mut headers = vec![
-            ("Content-Type", "application/json"),
-            ("x-location-id", "134"),
-            ("x-facility-group-id", "144"),
-        ];
+        let device = device_id(&self.cfg.member_id);
+        let mut headers = vec![("Content-Type", "application/json")];
         if req.auth {
             headers.push(("x-access-token", token.as_str()));
+        } else {
+            headers.push(("device_id", device.as_str()));
         }
 
         let started = Instant::now();
@@ -443,6 +469,21 @@ mod tests {
 
         assert_eq!(fake.paths(), ["/api/v1/auth/login", "/api/v1/x"]);
         let calls = fake.calls.borrow();
+        let login: Value = serde_json::from_str(calls[0].body.as_ref().unwrap()).unwrap();
+        assert_eq!(login["user_type"], "nbu");
+        assert!(login.get("front").is_none());
+        let device = &calls[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "device_id")
+            .unwrap()
+            .1;
+        assert_eq!(device, &device_id("176064"));
+        assert!(calls[0].headers.iter().all(|(k, _)| k != "x-access-token"));
+        assert!(calls[1]
+            .headers
+            .iter()
+            .all(|(k, _)| k != "x-location-id" && k != "x-facility-group-id" && k != "device_id"));
         assert!(calls[1]
             .headers
             .contains(&("x-access-token".to_string(), "fresh".to_string())));
@@ -515,6 +556,15 @@ mod tests {
         let (mut c, _) = client(&fake, &conn, &cfg, T0);
         assert!(c.request(&Req::get("/api/v1/x", "x")).is_err());
         assert_eq!(fake.calls.borrow().len(), 5);
+    }
+
+    #[test]
+    fn device_id_is_a_stable_uuid_shape() {
+        let id = device_id("176064");
+        let parts: Vec<usize> = id.split('-').map(str::len).collect();
+        assert_eq!(parts, [8, 4, 4, 4, 12]);
+        assert_eq!(id, device_id("176064"));
+        assert_ne!(id, device_id("1"));
     }
 
     #[test]
