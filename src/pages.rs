@@ -1,4 +1,4 @@
-use crate::auth::User;
+use crate::auth::{Feature, User};
 use crate::config::Quackr;
 use crate::pickle::dashboard::{self, Dashboard};
 use crate::sms::{self, Sms};
@@ -122,10 +122,10 @@ fn app_page(title: &str, active: &str, user: &User, features: Features, body: &s
             active == "users",
         ));
     }
-    if features.sms {
+    if features.sms && user.can(Feature::Sms) {
         links.push_str(&side_link("/sms", "SMS", ICON_SMS, active == "sms"));
     }
-    if features.pickle {
+    if features.pickle && user.can(Feature::Pickle) {
         links.push_str(&side_link(
             "/pickle",
             "Pickleball",
@@ -222,10 +222,10 @@ pub fn home(user: &User, features: Features) -> String {
     if user.is_admin {
         tiles.push_str(&tile("/admin/users", "Users", ICON_USERS));
     }
-    if features.sms {
+    if features.sms && user.can(Feature::Sms) {
         tiles.push_str(&tile("/sms", "SMS", ICON_SMS));
     }
-    if features.pickle {
+    if features.pickle && user.can(Feature::Pickle) {
         tiles.push_str(&tile("/pickle", "Pickleball", ICON_PADDLE));
     }
     app_page(
@@ -246,6 +246,27 @@ pub fn admin_users(users: &[User], me: &User, features: Features) -> String {
     let rows: String = users
         .iter()
         .map(|u| {
+            let grants: String = if u.is_admin {
+                String::new()
+            } else {
+                Feature::ALL
+                    .into_iter()
+                    .map(|f| {
+                        let (verb, style) = if u.access.contains(&f) {
+                            ("revoke", "btn-primary")
+                        } else {
+                            ("grant", "btn-outline-secondary")
+                        };
+                        format!(
+                            "<form method=\"post\" action=\"/admin/users/{id}/{verb}/{feature}\" class=\"d-inline me-1\">\
+                             <button class=\"btn btn-sm {style}\">{label}</button></form>",
+                            id = u.id,
+                            feature = f.as_str(),
+                            label = f.label()
+                        )
+                    })
+                    .collect()
+            };
             let actions = if u.id == me.id {
                 "<span class=\"text-body-secondary\">you</span>".to_string()
             } else {
@@ -255,7 +276,7 @@ pub fn admin_users(users: &[User], me: &User, features: Features) -> String {
                     ("disable", "Disable")
                 };
                 format!(
-                    "<form method=\"post\" action=\"/admin/users/{id}/{state_path}\" class=\"d-inline\">\
+                    "{grants}<form method=\"post\" action=\"/admin/users/{id}/{state_path}\" class=\"d-inline\">\
                      <button class=\"btn btn-sm btn-outline-secondary\">{state_label}</button></form>",
                     id = u.id
                 )
@@ -532,6 +553,14 @@ mod tests {
             name: Some(name.to_string()),
             is_admin,
             disabled: false,
+            access: vec![],
+        }
+    }
+
+    fn member_with(access: Vec<Feature>) -> User {
+        User {
+            access,
+            ..user(2, "sam", false)
         }
     }
 
@@ -631,7 +660,7 @@ mod tests {
     #[test]
     fn sms_link_needs_config() {
         let admin = user(1, "mike", true);
-        let member = user(2, "sam", false);
+        let member = member_with(vec![Feature::Sms]);
         assert!(!home(&admin, Features::default()).contains("/sms"));
         assert!(!home(&member, Features::default()).contains("/sms"));
         for u in [&admin, &member] {
@@ -639,6 +668,23 @@ mod tests {
             assert!(html.contains("side-link\" href=\"/sms\""));
             assert!(html.contains("class=\"tile\" href=\"/sms\""));
         }
+    }
+
+    #[test]
+    fn sms_link_needs_the_grant() {
+        let html = home(&member_with(vec![Feature::Pickle]), sms_on());
+        assert!(!html.contains("/sms"));
+    }
+
+    #[test]
+    fn users_page_shows_grant_toggles_for_members_only() {
+        let admin = user(1, "mike", true);
+        let sam = member_with(vec![Feature::Sms]);
+        let html = admin_users(&[user(1, "mike", true), sam], &admin, Features::default());
+        assert!(html.contains("/admin/users/2/revoke/sms"));
+        assert!(html.contains("/admin/users/2/grant/pickle"));
+        assert!(!html.contains("/admin/users/1/grant"));
+        assert!(!html.contains("/admin/users/1/revoke"));
     }
 
     #[test]
@@ -693,9 +739,9 @@ mod tests {
     }
 
     #[test]
-    fn pickle_link_needs_config_and_shows_for_every_signed_in_user() {
+    fn pickle_link_needs_config_and_the_grant() {
         let admin = user(1, "mike", true);
-        let member = user(2, "sam", false);
+        let member = member_with(vec![Feature::Pickle]);
         let data = Dashboard {
             bookings: vec![],
             runs: vec![],
@@ -709,6 +755,12 @@ mod tests {
                 pickle(u, pickle_on(), &data, 0).contains("side-link active\" href=\"/pickle\"")
             );
         }
+    }
+
+    #[test]
+    fn pickle_link_hidden_without_the_grant() {
+        let html = home(&member_with(vec![Feature::Sms]), pickle_on());
+        assert!(!html.contains("/pickle"));
     }
 
     #[test]

@@ -10,12 +10,54 @@ const RESEND_COOLDOWN: i64 = 60;
 pub const SESSION_TTL: i64 = 30 * 24 * 3600;
 const SLIDE_AFTER: i64 = 3600;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Feature {
+    Sms,
+    Pickle,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 2] = [Feature::Sms, Feature::Pickle];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Feature::Sms => "sms",
+            Feature::Pickle => "pickle",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Feature::Sms => "SMS",
+            Feature::Pickle => "Pickle",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Feature> {
+        Feature::ALL.into_iter().find(|f| f.as_str() == s)
+    }
+}
+
 pub struct User {
     pub id: i64,
     pub email: String,
     pub name: Option<String>,
     pub is_admin: bool,
     pub disabled: bool,
+    pub access: Vec<Feature>,
+}
+
+impl User {
+    pub fn can(&self, feature: Feature) -> bool {
+        self.is_admin || self.access.contains(&feature)
+    }
+}
+
+fn parse_access(list: Option<String>) -> Vec<Feature> {
+    list.iter()
+        .flat_map(|l| l.split(','))
+        .filter_map(Feature::parse)
+        .collect()
 }
 
 fn to_hex(bytes: &[u8]) -> String {
@@ -64,10 +106,12 @@ fn user_from_row(r: &rusqlite::Row) -> rusqlite::Result<User> {
         name: r.get(2)?,
         is_admin: r.get(3)?,
         disabled: r.get::<_, Option<i64>>(4)?.is_some(),
+        access: parse_access(r.get(5)?),
     })
 }
 
-const USER_COLS: &str = "id, email, name, is_admin, disabled_at";
+const USER_COLS: &str = "id, email, name, is_admin, disabled_at,
+    (SELECT group_concat(feature) FROM user_access WHERE user_id = users.id)";
 
 fn find_active_user(conn: &Connection, email: &str) -> rusqlite::Result<Option<User>> {
     conn.query_row(
@@ -170,7 +214,8 @@ pub fn session_user(
 ) -> rusqlite::Result<Option<(User, bool)>> {
     let row = conn
         .query_row(
-            "SELECT s.id, s.last_seen_at, u.id, u.email, u.name, u.is_admin, u.disabled_at
+            "SELECT s.id, s.last_seen_at, u.id, u.email, u.name, u.is_admin, u.disabled_at,
+               (SELECT group_concat(feature) FROM user_access WHERE user_id = u.id)
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = ?1 AND s.expires_at > ?2 AND u.disabled_at IS NULL",
             params![hash(token), now],
@@ -184,6 +229,7 @@ pub fn session_user(
                         name: r.get(4)?,
                         is_admin: r.get(5)?,
                         disabled: false,
+                        access: parse_access(r.get(7)?),
                     },
                 ))
             },
@@ -244,6 +290,21 @@ pub fn set_admin(conn: &Connection, id: i64, is_admin: bool) -> rusqlite::Result
         "UPDATE users SET is_admin = ?2 WHERE id = ?1",
         params![id, is_admin],
     )?;
+    Ok(())
+}
+
+pub fn set_access(conn: &Connection, id: i64, feature: Feature, on: bool) -> rusqlite::Result<()> {
+    if on {
+        conn.execute(
+            "INSERT OR IGNORE INTO user_access (user_id, feature) VALUES (?1, ?2)",
+            params![id, feature.as_str()],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM user_access WHERE user_id = ?1 AND feature = ?2",
+            params![id, feature.as_str()],
+        )?;
+    }
     Ok(())
 }
 
@@ -412,6 +473,70 @@ mod tests {
         let token = verify_code(&conn, &email, &code, T0).unwrap().unwrap();
         logout(&conn, &token).unwrap();
         assert!(session_user(&conn, &token, T0 + 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn access_round_trips_and_admin_can_do_everything() {
+        let conn = setup();
+        add_user(&conn, "sam@example.com", None, false, T0).unwrap();
+        let id = user_id_by_email(&conn, "sam@example.com").unwrap().unwrap();
+        let sam = |conn: &Connection| {
+            list_users(conn)
+                .unwrap()
+                .into_iter()
+                .find(|u| u.id == id)
+                .unwrap()
+        };
+        assert!(!sam(&conn).can(Feature::Pickle));
+
+        set_access(&conn, id, Feature::Pickle, true).unwrap();
+        set_access(&conn, id, Feature::Pickle, true).unwrap();
+        assert_eq!(sam(&conn).access, vec![Feature::Pickle]);
+        assert!(sam(&conn).can(Feature::Pickle));
+        assert!(!sam(&conn).can(Feature::Sms));
+
+        set_access(&conn, id, Feature::Pickle, false).unwrap();
+        assert!(sam(&conn).access.is_empty());
+
+        let mike = list_users(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|u| u.is_admin)
+            .unwrap();
+        assert!(Feature::ALL.into_iter().all(|f| mike.can(f)));
+    }
+
+    #[test]
+    fn session_user_carries_access() {
+        let conn = setup();
+        let (email, code) = request_code(&conn, "mike@example.com", T0)
+            .unwrap()
+            .unwrap();
+        let token = verify_code(&conn, &email, &code, T0).unwrap().unwrap();
+        let id = user_id_by_email(&conn, &email).unwrap().unwrap();
+        set_access(&conn, id, Feature::Sms, true).unwrap();
+        let (user, _) = session_user(&conn, &token, T0 + 1).unwrap().unwrap();
+        assert_eq!(user.access, vec![Feature::Sms]);
+    }
+
+    #[test]
+    fn migration_grants_sms_to_existing_users() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrate_to(&mut conn, 2).unwrap();
+        conn.execute(
+            "INSERT INTO users (email, created_at) VALUES ('old@example.com', 1)",
+            [],
+        )
+        .unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let users = list_users(&conn).unwrap();
+        assert_eq!(users[0].access, vec![Feature::Sms]);
+    }
+
+    #[test]
+    fn parse_feature_rejects_unknown() {
+        assert_eq!(Feature::parse("pickle"), Some(Feature::Pickle));
+        assert_eq!(Feature::parse("nope"), None);
     }
 
     #[test]

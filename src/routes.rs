@@ -1,4 +1,4 @@
-use crate::auth::{self, User, SESSION_TTL};
+use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
 use crate::{log, mail, pages, pickle, sms};
@@ -69,9 +69,11 @@ fn authed(
         }
         (_, ["admin", ..]) if !user.is_admin => Ok(Resp::html(404, pages::not_found())),
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
-        ("GET", ["sms"]) => Ok(sms_page(cfg, user)),
-        ("GET", ["pickle"]) => pickle_page(conn, cfg, user, now),
-        ("POST", ["pickle", "bookings", id, "cancel"]) => pickle_cancel(conn, cfg, user, id),
+        ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
+        ("GET", ["pickle"]) if user.can(Feature::Pickle) => pickle_page(conn, cfg, user, now),
+        ("POST", ["pickle", "bookings", id, "cancel"]) if user.can(Feature::Pickle) => {
+            pickle_cancel(conn, cfg, user, id)
+        }
         ("POST", ["admin", "users"]) => {
             if let Some(email) = req.form.get("email").filter(|e| !e.trim().is_empty()) {
                 let name = req
@@ -81,6 +83,13 @@ fn authed(
                     .filter(|n| !n.is_empty());
                 auth::add_user(conn, email, name, false, now)?;
             }
+            Ok(Resp::redirect("/admin/users"))
+        }
+        ("POST", ["admin", "users", id, action @ ("grant" | "revoke"), feature]) => {
+            let (Ok(id), Some(feature)) = (id.parse::<i64>(), Feature::parse(feature)) else {
+                return Ok(Resp::html(404, pages::not_found()));
+            };
+            auth::set_access(conn, id, feature, *action == "grant")?;
             Ok(Resp::redirect("/admin/users"))
         }
         ("POST", ["admin", "users", id, action]) => {
