@@ -1,8 +1,15 @@
 use crate::auth::{self, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
-use crate::{log, mail, pages, sms};
+use crate::{log, mail, pages, pickle, sms};
 use rusqlite::Connection;
+
+fn features(cfg: &Config) -> pages::Features {
+    pages::Features {
+        sms: cfg.quackr.is_some(),
+        pickle: cfg.pickle.is_some(),
+    }
+}
 
 pub fn handle(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> Resp {
     match dispatch(conn, cfg, req, now) {
@@ -55,7 +62,7 @@ fn authed(
     now: i64,
 ) -> rusqlite::Result<Resp> {
     match (req.method.as_str(), segs) {
-        ("GET", []) => Ok(Resp::html(200, pages::home(user, cfg.quackr.is_some()))),
+        ("GET", []) => Ok(Resp::html(200, pages::home(user, features(cfg)))),
         ("POST", ["logout"]) => {
             auth::logout(conn, token)?;
             Ok(Resp::redirect("/login").header("Set-Cookie", session_cookie("", 0)))
@@ -63,6 +70,8 @@ fn authed(
         (_, ["admin", ..]) if !user.is_admin => Ok(Resp::html(404, pages::not_found())),
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
         ("GET", ["sms"]) => Ok(sms_page(cfg, user)),
+        ("GET", ["pickle"]) => pickle_page(conn, cfg, user, now),
+        ("POST", ["pickle", "bookings", id, "cancel"]) => pickle_cancel(conn, cfg, user, id),
         ("POST", ["admin", "users"]) => {
             if let Some(email) = req.form.get("email").filter(|e| !e.trim().is_empty()) {
                 let name = req
@@ -95,7 +104,7 @@ fn admin_page(conn: &Connection, cfg: &Config, me: &User) -> rusqlite::Result<Re
     let users = auth::list_users(conn)?;
     Ok(Resp::html(
         200,
-        pages::admin_users(&users, me, cfg.quackr.is_some()),
+        pages::admin_users(&users, me, features(cfg)),
     ))
 }
 
@@ -106,7 +115,57 @@ fn sms_page(cfg: &Config, user: &User) -> Resp {
     let messages = sms::fetch(quackr)
         .map_err(|e| log::error(&format!("quackr fetch failed: {e}")))
         .ok();
-    Resp::html(200, pages::sms(user, quackr, messages.as_deref()))
+    Resp::html(
+        200,
+        pages::sms(user, features(cfg), quackr, messages.as_deref()),
+    )
+}
+
+fn pickle_page(conn: &Connection, cfg: &Config, user: &User, now: i64) -> rusqlite::Result<Resp> {
+    if cfg.pickle.is_none() {
+        return Ok(Resp::html(404, pages::not_found()));
+    }
+    let data = pickle::dashboard::load(conn, now)?;
+    Ok(Resp::html(
+        200,
+        pages::pickle(user, features(cfg), &data, now),
+    ))
+}
+
+fn pickle_cancel(conn: &Connection, cfg: &Config, user: &User, id: &str) -> rusqlite::Result<Resp> {
+    let Some(pickle_cfg) = cfg.pickle.as_ref() else {
+        return Ok(Resp::html(404, pages::not_found()));
+    };
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(Resp::html(404, pages::not_found()));
+    }
+    let failed = |message: &str| {
+        Resp::html(
+            200,
+            pages::pickle_cancel_failed(user, features(cfg), message),
+        )
+    };
+    let _lock = match pickle::acquire_lock() {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            return Ok(failed(
+                "Another pickle job is running. Try again in a minute.",
+            ))
+        }
+        Err(e) => {
+            log::error(&format!("pickle lock failed: {e}"));
+            return Ok(failed("Could not start the cancel. Try again in a moment."));
+        }
+    };
+    Ok(
+        match pickle::cancel_booking(conn, pickle_cfg, &pickle::UreqTransport::new(), id) {
+            Ok(()) => Resp::redirect("/pickle"),
+            Err(e) => {
+                log::error(&format!("pickle cancel {id} failed: {e}"));
+                failed(&e)
+            }
+        },
+    )
 }
 
 fn post_login(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::Result<Resp> {

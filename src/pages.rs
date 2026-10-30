@@ -1,6 +1,13 @@
 use crate::auth::User;
 use crate::config::Quackr;
+use crate::pickle::dashboard::{self, Dashboard};
 use crate::sms::{self, Sms};
+
+#[derive(Clone, Copy, Default)]
+pub struct Features {
+    pub sms: bool,
+    pub pickle: bool,
+}
 
 pub fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -60,6 +67,8 @@ const ICON_LOGOUT: &str =
     "<path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"/><path d=\"m16 17 5-5-5-5\"/><path d=\"M21 12H9\"/>";
 const ICON_SMS: &str =
     "<path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/>";
+const ICON_PADDLE: &str = "<circle cx=\"10\" cy=\"10\" r=\"7\"/><path d=\"m15 15 6 6\"/>\
+    <circle cx=\"8\" cy=\"8\" r=\"0.5\"/><circle cx=\"12\" cy=\"8\" r=\"0.5\"/><circle cx=\"10\" cy=\"12\" r=\"0.5\"/>";
 const ICON_MENU: &str = "<path d=\"M4 6h16M4 12h16M4 18h16\"/>";
 
 fn icon(paths: &str) -> String {
@@ -97,7 +106,7 @@ fn side_link(href: &str, label: &str, paths: &str, is_active: bool) -> String {
     )
 }
 
-fn app_page(title: &str, active: &str, user: &User, has_sms: bool, body: &str) -> String {
+fn app_page(title: &str, active: &str, user: &User, features: Features, body: &str) -> String {
     let who = user.name.as_deref().unwrap_or(&user.email);
     let initial: String = who
         .chars()
@@ -113,8 +122,16 @@ fn app_page(title: &str, active: &str, user: &User, has_sms: bool, body: &str) -
             active == "users",
         ));
     }
-    if has_sms {
+    if features.sms {
         links.push_str(&side_link("/sms", "SMS", ICON_SMS, active == "sms"));
+    }
+    if features.pickle {
+        links.push_str(&side_link(
+            "/pickle",
+            "Pickleball",
+            ICON_PADDLE,
+            active == "pickle",
+        ));
     }
     shell(
         title,
@@ -200,19 +217,22 @@ pub fn code(email: &str, error: bool) -> String {
     )
 }
 
-pub fn home(user: &User, has_sms: bool) -> String {
+pub fn home(user: &User, features: Features) -> String {
     let mut tiles = String::new();
     if user.is_admin {
         tiles.push_str(&tile("/admin/users", "Users", ICON_USERS));
     }
-    if has_sms {
+    if features.sms {
         tiles.push_str(&tile("/sms", "SMS", ICON_SMS));
+    }
+    if features.pickle {
+        tiles.push_str(&tile("/pickle", "Pickleball", ICON_PADDLE));
     }
     app_page(
         "Home",
         "home",
         user,
-        has_sms,
+        features,
         &format!(
             "<section class=\"hero\"><h1 class=\"hero-word\">WillCrock</h1>\
              <img src=\"{crest}\" alt=\"WillCrock crest: ID IAM SCIO\" class=\"hero-crest\"></section>\
@@ -222,7 +242,7 @@ pub fn home(user: &User, has_sms: bool) -> String {
     )
 }
 
-pub fn admin_users(users: &[User], me: &User, has_sms: bool) -> String {
+pub fn admin_users(users: &[User], me: &User, features: Features) -> String {
     let rows: String = users
         .iter()
         .map(|u| {
@@ -263,7 +283,7 @@ pub fn admin_users(users: &[User], me: &User, has_sms: bool) -> String {
         "Users",
         "users",
         me,
-        has_sms,
+        features,
         &format!(
             "{}<div class=\"card shadow-sm mb-4\"><div class=\"table-responsive\">\
              <table class=\"table table-hover align-middle mb-0\"><tbody>{rows}</tbody></table>\
@@ -280,7 +300,7 @@ pub fn admin_users(users: &[User], me: &User, has_sms: bool) -> String {
     )
 }
 
-pub fn sms(user: &User, quackr: &Quackr, messages: Option<&[Sms]>) -> String {
+pub fn sms(user: &User, features: Features, quackr: &Quackr, messages: Option<&[Sms]>) -> String {
     let notice = |text: &str| {
         format!("<div class=\"card shadow-sm\"><div class=\"card-body\">{text}</div></div>")
     };
@@ -293,7 +313,7 @@ pub fn sms(user: &User, quackr: &Quackr, messages: Option<&[Sms]>) -> String {
         "SMS",
         "sms",
         user,
-        true,
+        features,
         &format!(
             "<div class=\"d-flex align-items-baseline justify-content-between gap-3\">{title}\
              <a href=\"/sms\">Refresh</a></div>\
@@ -330,6 +350,166 @@ fn sms_card(m: &Sms) -> String {
     )
 }
 
+fn pre(label: &str, body: &str) -> String {
+    format!(
+        "<div class=\"text-body-secondary\">{label}</div>\
+         <pre class=\"border rounded p-2 mb-1 pickle-body\">{}</pre>",
+        esc(&dashboard::pretty_body(body))
+    )
+}
+
+fn request_html(r: &dashboard::Request) -> String {
+    let ok = r.status.is_some_and(|s| s < 400);
+    let mut meta = r.context.clone().unwrap_or_default();
+    if r.attempt > 1 {
+        meta.push_str(&format!(", attempt {}", r.attempt));
+    }
+    if let Some(ms) = r.duration_ms {
+        meta.push_str(&format!(", {ms}ms"));
+    }
+    let mut html = format!(
+        "<div class=\"ms-3 mb-3 small\"><div>{} <strong>{}</strong> {} \
+         <span class=\"badge {}\">{}</span> <span class=\"text-body-secondary\">{}</span></div>",
+        esc(&dashboard::local(&r.created_at, "%-I:%M:%S%P")),
+        esc(&r.method),
+        esc(if r.url.is_empty() { "/" } else { &r.url }),
+        if ok {
+            "text-bg-success"
+        } else {
+            "text-bg-danger"
+        },
+        r.status
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "no response".to_string()),
+        esc(&meta),
+    );
+    if let Some(e) = r.error.as_deref().filter(|e| !e.is_empty()) {
+        html.push_str(&format!("<pre class=\"text-danger mb-1\">{}</pre>", esc(e)));
+    }
+    if let Some(b) = r.request_body.as_deref().filter(|b| !b.is_empty()) {
+        html.push_str(&pre("Request", b));
+    }
+    if let Some(b) = r.response_body.as_deref().filter(|b| !b.is_empty()) {
+        html.push_str(&pre("Response", b));
+    }
+    html.push_str("</div>");
+    html
+}
+
+fn run_html(run: &dashboard::Run) -> String {
+    let badge = match run.status.as_str() {
+        "ok" => "text-bg-success",
+        "error" => "text-bg-danger",
+        _ => "text-bg-secondary",
+    };
+    let detail = run.detail.as_deref().filter(|d| !d.is_empty());
+    let n = run.requests.len();
+    let requests: String = run.requests.iter().map(request_html).collect();
+    format!(
+        "<details class=\"mb-2\"><summary class=\"h6\"{title}>{when} \
+         <span class=\"badge {badge}\">{status}</span> {what} \
+         <span class=\"text-body-secondary small\">{cmd}, {n} request{s}</span></summary>{detail_html}{requests}</details>",
+        title = detail
+            .map(|d| format!(" title=\"{}\"", esc(d)))
+            .unwrap_or_default(),
+        when = esc(&dashboard::local(&run.started_at, "%a %-I:%M:%S%P")),
+        status = esc(&run.status),
+        what = esc(run
+            .summary
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&run.command)),
+        cmd = esc(&run.command),
+        s = if n == 1 { "" } else { "s" },
+        detail_html = detail
+            .map(|d| format!(
+                "<pre class=\"ms-3 small text-body-secondary\">{}</pre>",
+                esc(d)
+            ))
+            .unwrap_or_default(),
+    )
+}
+
+fn booking_row(b: &dashboard::Booking, now: i64) -> String {
+    let date = dashboard::local(&b.start_time, "%A - %b %d");
+    let time = format!(
+        "{} - {}",
+        dashboard::local(&b.start_time, "%-I:%M%P"),
+        dashboard::local(&b.end_time, "%-I:%M%P")
+    );
+    let cancel = if dashboard::is_future(&b.start_time, now) {
+        format!(
+            "<form method=\"post\" action=\"/pickle/bookings/{id}/cancel\" class=\"d-inline\" \
+             onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"{msg}\">\
+             <button class=\"btn btn-sm btn-outline-danger\">Cancel</button></form>",
+            id = esc(&b.id),
+            msg = esc(&format!("Are you sure you want to cancel {date}, {time}?")),
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"text-end\">{}</td></tr>",
+        esc(&date),
+        esc(&time),
+        esc(b.court.as_deref().unwrap_or("")),
+        if b.checked_in { "&#9989;" } else { "&#10134;" },
+        cancel
+    )
+}
+
+pub fn pickle(user: &User, features: Features, data: &Dashboard, now: i64) -> String {
+    let rows: String = data.bookings.iter().map(|b| booking_row(b, now)).collect();
+    let refreshed = data
+        .bookings
+        .first()
+        .map(|b| {
+            format!(
+                "Refreshed {}",
+                dashboard::local(&b.refreshed_at, "%A %B %d %Y %-I:%M%P")
+            )
+        })
+        .unwrap_or_else(|| "No upcoming bookings.".to_string());
+    let history: String = if data.runs.is_empty() {
+        "<p class=\"text-body-secondary small\">Nothing recorded.</p>".to_string()
+    } else {
+        data.runs.iter().map(run_html).collect()
+    };
+    app_page(
+        "Pickleball",
+        "pickle",
+        user,
+        features,
+        &format!(
+            "{}<div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
+             <table class=\"table table-hover align-middle mb-0\">\
+             <thead><tr><th>Date</th><th>Time</th><th>Court</th><th>Checked in?</th><th></th></tr></thead>\
+             <tbody>{rows}</tbody></table></div></div>\
+             <p class=\"text-body-secondary small\">{}</p>\
+             <h2 class=\"h5 pt-3\">History (last {} days)</h2>{history}",
+            page_title("Pickleball"),
+            esc(&refreshed),
+            dashboard::HISTORY_DAYS,
+        ),
+    )
+}
+
+pub fn pickle_cancel_failed(user: &User, features: Features, message: &str) -> String {
+    app_page(
+        "Pickleball",
+        "pickle",
+        user,
+        features,
+        &format!(
+            "{}<div class=\"alert alert-danger\">Cancel did not go through.</div>\
+             <pre class=\"border rounded p-2 pickle-body\">{}</pre>\
+             <a href=\"/pickle\">Back to schedule</a>",
+            page_title("Pickleball"),
+            esc(message)
+        ),
+    )
+}
+
 pub fn not_found() -> String {
     card_page("Not found", "<a href=\"/\">Home</a>")
 }
@@ -357,7 +537,7 @@ mod tests {
 
     #[test]
     fn home_marks_home_active_and_shows_footer() {
-        let html = home(&user(1, "mike", false), false);
+        let html = home(&user(1, "mike", false), Features::default());
         assert!(html.contains("side-link active\" href=\"/\""));
         assert!(html.contains("class=\"version\""));
         assert!(html.contains("action=\"/logout\""));
@@ -366,31 +546,30 @@ mod tests {
 
     #[test]
     fn users_link_is_admin_only() {
-        assert!(!home(&user(1, "sam", false), false).contains("/admin/users"));
-        assert!(home(&user(1, "mike", true), false).contains("href=\"/admin/users\""));
+        assert!(!home(&user(1, "sam", false), Features::default()).contains("/admin/users"));
+        assert!(home(&user(1, "mike", true), Features::default()).contains("href=\"/admin/users\""));
     }
 
     #[test]
     fn admin_page_marks_users_active() {
         let me = user(1, "mike", true);
-        let html = admin_users(std::slice::from_ref(&me), &me, false);
+        let html = admin_users(std::slice::from_ref(&me), &me, Features::default());
         assert!(html.contains("side-link active\" href=\"/admin/users\""));
     }
 
     #[test]
     fn home_is_a_crest_hero_with_admin_tile() {
-        let member = home(&user(1, "sam", false), false);
+        let member = home(&user(1, "sam", false), Features::default());
         assert!(member.contains("class=\"hero-crest\""));
         assert!(!member.contains("Hello"));
         assert!(!member.contains("class=\"tile\""));
-        assert!(
-            home(&user(2, "mike", true), false).contains("class=\"tile\" href=\"/admin/users\"")
-        );
+        assert!(home(&user(2, "mike", true), Features::default())
+            .contains("class=\"tile\" href=\"/admin/users\""));
     }
 
     #[test]
     fn changeable_assets_are_versioned() {
-        let signed_in = home(&user(1, "sam", false), false);
+        let signed_in = home(&user(1, "sam", false), Features::default());
         let signed_out = login(None);
         for html in [&signed_in, &signed_out] {
             assert!(html.contains("/static/site.css?v="));
@@ -416,7 +595,22 @@ mod tests {
 
     #[test]
     fn version_label_has_a_tooltip() {
-        assert!(home(&user(1, "sam", false), false).contains("class=\"version\" title=\""));
+        assert!(home(&user(1, "sam", false), Features::default())
+            .contains("class=\"version\" title=\""));
+    }
+
+    fn sms_on() -> Features {
+        Features {
+            sms: true,
+            ..Features::default()
+        }
+    }
+
+    fn pickle_on() -> Features {
+        Features {
+            pickle: true,
+            ..Features::default()
+        }
     }
 
     fn quackr() -> Quackr {
@@ -438,10 +632,10 @@ mod tests {
     fn sms_link_needs_config() {
         let admin = user(1, "mike", true);
         let member = user(2, "sam", false);
-        assert!(!home(&admin, false).contains("/sms"));
-        assert!(!home(&member, false).contains("/sms"));
+        assert!(!home(&admin, Features::default()).contains("/sms"));
+        assert!(!home(&member, Features::default()).contains("/sms"));
         for u in [&admin, &member] {
-            let html = home(u, true);
+            let html = home(u, sms_on());
             assert!(html.contains("side-link\" href=\"/sms\""));
             assert!(html.contains("class=\"tile\" href=\"/sms\""));
         }
@@ -449,7 +643,7 @@ mod tests {
 
     #[test]
     fn sms_page_marks_sms_active_and_shows_number() {
-        let html = sms(&user(1, "mike", true), &quackr(), Some(&[]));
+        let html = sms(&user(1, "mike", true), sms_on(), &quackr(), Some(&[]));
         assert!(html.contains("side-link active\" href=\"/sms\""));
         assert!(html.contains("(555) 123-4567"));
         assert!(html.contains("data-copy=\"15551234567\""));
@@ -460,14 +654,14 @@ mod tests {
 
     #[test]
     fn sms_page_shows_error_state() {
-        let html = sms(&user(1, "mike", true), &quackr(), None);
+        let html = sms(&user(1, "mike", true), sms_on(), &quackr(), None);
         assert!(html.contains("Could not load messages."));
     }
 
     #[test]
     fn sms_card_has_code_button_only_with_a_code() {
         let list = [msg("Your code is 123-456"), msg("see you soon")];
-        let html = sms(&user(1, "mike", true), &quackr(), Some(&list));
+        let html = sms(&user(1, "mike", true), sms_on(), &quackr(), Some(&list));
         assert_eq!(html.matches("sms-code").count(), 1);
         assert!(html.contains("data-copy=\"123456\">123-456</button>"));
     }
@@ -475,15 +669,118 @@ mod tests {
     #[test]
     fn sms_text_is_escaped() {
         let list = [msg("<script>alert(1)</script>")];
-        let html = sms(&user(1, "mike", true), &quackr(), Some(&list));
+        let html = sms(&user(1, "mike", true), sms_on(), &quackr(), Some(&list));
         assert!(!html.contains("<script>alert"));
         assert!(html.contains("&lt;script&gt;alert(1)"));
     }
 
     #[test]
     fn user_text_is_escaped() {
-        let html = home(&user(1, "<b>x</b>", false), false);
+        let html = home(&user(1, "<b>x</b>", false), Features::default());
         assert!(!html.contains("<b>x</b>"));
         assert!(html.contains("&lt;b&gt;x&lt;/b&gt;"));
+    }
+
+    fn booking(id: &str, start: &str, court: &str) -> dashboard::Booking {
+        dashboard::Booking {
+            id: id.to_string(),
+            start_time: start.to_string(),
+            end_time: "2099-01-01T16:30:00.000Z".to_string(),
+            court: Some(court.to_string()),
+            checked_in: false,
+            refreshed_at: "2026-10-18T13:30:00.000Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn pickle_link_needs_config_and_shows_for_every_signed_in_user() {
+        let admin = user(1, "mike", true);
+        let member = user(2, "sam", false);
+        let data = Dashboard {
+            bookings: vec![],
+            runs: vec![],
+        };
+        for u in [&admin, &member] {
+            assert!(!home(u, Features::default()).contains("/pickle"));
+            let html = home(u, pickle_on());
+            assert!(html.contains("side-link\" href=\"/pickle\""));
+            assert!(html.contains("class=\"tile\" href=\"/pickle\""));
+            assert!(
+                pickle(u, pickle_on(), &data, 0).contains("side-link active\" href=\"/pickle\"")
+            );
+        }
+    }
+
+    #[test]
+    fn pickle_cancel_form_only_for_future_bookings_and_asks_first() {
+        let data = Dashboard {
+            bookings: vec![
+                booking("11", "2000-01-01T15:00:00.000Z", "5C"),
+                booking("22", "2099-01-01T15:00:00.000Z", "6B"),
+            ],
+            runs: vec![],
+        };
+        let html = pickle(&user(2, "sam", false), pickle_on(), &data, 1_000_000_000);
+        assert!(!html.contains("/pickle/bookings/11/cancel"));
+        assert!(html.contains("/pickle/bookings/22/cancel"));
+        assert!(html.contains("data-msg=\"Are you sure you want to cancel"));
+        assert!(html.contains("return confirm(this.dataset.msg)"));
+        assert!(html.contains("Nothing recorded."));
+    }
+
+    #[test]
+    fn pickle_empty_state_and_refreshed_caption() {
+        let empty = Dashboard {
+            bookings: vec![],
+            runs: vec![],
+        };
+        assert!(pickle(&user(1, "mike", true), pickle_on(), &empty, 0)
+            .contains("No upcoming bookings."));
+        let some = Dashboard {
+            bookings: vec![booking("1", "2099-01-01T15:00:00.000Z", "6B")],
+            runs: vec![],
+        };
+        assert!(pickle(&user(1, "mike", true), pickle_on(), &some, 0)
+            .contains("Refreshed Sunday October 18 2026"));
+    }
+
+    #[test]
+    fn pickle_text_is_escaped() {
+        let data = Dashboard {
+            bookings: vec![booking("1", "2099-01-01T15:00:00.000Z", "<i>x</i>")],
+            runs: vec![dashboard::Run {
+                started_at: "2026-10-18T13:30:00Z".to_string(),
+                command: "sync".to_string(),
+                status: "error".to_string(),
+                summary: Some("<script>".to_string()),
+                detail: None,
+                requests: vec![dashboard::Request {
+                    created_at: "2026-10-18T13:30:00Z".to_string(),
+                    context: None,
+                    method: "GET".to_string(),
+                    url: "/a".to_string(),
+                    attempt: 1,
+                    status: Some(500),
+                    duration_ms: None,
+                    request_body: None,
+                    response_body: Some("<b>504</b>".to_string()),
+                    error: Some("<e>".to_string()),
+                }],
+            }],
+        };
+        let html = pickle(&user(1, "mike", true), pickle_on(), &data, 0);
+        for raw in ["<i>x</i>", "<script>", "<b>504</b>", "<e>"] {
+            assert!(!html.contains(raw), "{raw}");
+        }
+        assert!(html.contains("&lt;b&gt;504&lt;/b&gt;"));
+        assert!(html.contains("text-bg-danger"));
+    }
+
+    #[test]
+    fn pickle_cancel_failure_page_shows_the_message_escaped() {
+        let html = pickle_cancel_failed(&user(1, "mike", true), pickle_on(), "<nope>");
+        assert!(html.contains("Cancel did not go through."));
+        assert!(html.contains("&lt;nope&gt;"));
+        assert!(!html.contains("<nope>"));
     }
 }

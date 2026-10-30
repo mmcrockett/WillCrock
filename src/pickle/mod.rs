@@ -1,10 +1,12 @@
 mod api;
+pub mod dashboard;
 mod history;
 mod ops;
 mod time;
 
 use crate::{cli, config, db};
-use api::{Client, Res, Transport, UreqTransport};
+pub use api::UreqTransport;
+use api::{Client, Res, Transport};
 use jiff::Timestamp;
 use ops::CancelOutcome;
 use rusqlite::Connection;
@@ -133,6 +135,36 @@ fn execute(
     cmd: &Cmd,
     name: &str,
 ) -> Res<()> {
+    in_run(conn, cfg, transport, name, |c| exec(c, cmd))
+}
+
+pub fn cancel_booking(
+    conn: &Connection,
+    cfg: &config::Pickle,
+    transport: &dyn Transport,
+    id: &str,
+) -> Res<()> {
+    in_run(conn, cfg, transport, "cancel", |c| {
+        match c.cancel(id, None)? {
+            CancelOutcome::Done(r) if r.ok() => {}
+            CancelOutcome::Done(r) => return Err(r.message()),
+            CancelOutcome::NotAllowed => return Err("not allowed".to_string()),
+        }
+        history::delete_booking(conn, id).map_err(api::db_err)?;
+        if let Err(e) = c.sync() {
+            c.detail(format!("sync after cancel failed: {e}"));
+        }
+        Ok(())
+    })
+}
+
+fn in_run(
+    conn: &Connection,
+    cfg: &config::Pickle,
+    transport: &dyn Transport,
+    name: &str,
+    work: impl FnOnce(&mut Client) -> Res<()>,
+) -> Res<()> {
     let now = Timestamp::now();
     let cutoff = time::plus_millis(now, -history::RETENTION_DAYS * 24 * 3600 * 1000);
     history::prune(conn, &time::iso(cutoff)).map_err(api::db_err)?;
@@ -147,7 +179,7 @@ fn execute(
         Box::new(Timestamp::now),
         Box::new(std::thread::sleep),
     )?;
-    let error = match catch_unwind(AssertUnwindSafe(|| exec(&mut client, cmd))) {
+    let error = match catch_unwind(AssertUnwindSafe(|| work(&mut client))) {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some(e),
         Err(p) => Some(panic_message(p)),
@@ -157,7 +189,7 @@ fn execute(
 }
 
 // Replaces cron's setlock -n: a run that finds the lock held skips quietly.
-fn acquire_lock() -> Result<Option<File>, String> {
+pub fn acquire_lock() -> Result<Option<File>, String> {
     let path = std::env::temp_dir().join("willcrock-pickle.lock");
     let file = File::create(&path).map_err(|e| format!("create {}: {e}", path.display()))?;
     match file.try_lock() {
@@ -251,5 +283,80 @@ mod tests {
         ] {
             assert!(parse(&args(bad)).is_err(), "{bad}");
         }
+    }
+
+    fn seed_booking(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO pickle_bookings VALUES (?1, '2026-11-05T13:30:00.000Z', '2026-11-05T15:00:00.000Z', 'Pickleball 5D', 0, 'r')",
+            [id],
+        )
+        .unwrap();
+    }
+
+    fn bookings_left(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM pickle_bookings", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn cancel_booking_deletes_then_resyncs() {
+        use api::testing::{cfg, Fake};
+        let conn = crate::db::open_memory();
+        history::save_token(&conn, "tok", "t").unwrap();
+        seed_booking(&conn, "55");
+        let fake = Fake::default();
+        fake.push(200, r#"{"message":"Success"}"#);
+        fake.push(200, r#"{"payload":[]}"#);
+        cancel_booking(&conn, &cfg(), &fake, "55").unwrap();
+
+        assert_eq!(
+            fake.paths(),
+            [
+                "/api/v1/appointment/cancel/55",
+                "/api/v1/appointment/booked?sport_id=1&location_id=134"
+            ]
+        );
+        assert_eq!(bookings_left(&conn), 0);
+        let (command, status): (String, String) = conn
+            .query_row("SELECT command, status FROM pickle_runs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((command.as_str(), status.as_str()), ("cancel", "ok"));
+    }
+
+    #[test]
+    fn cancel_booking_reports_a_refusal_and_keeps_the_booking() {
+        use api::testing::{cfg, Fake};
+        let conn = crate::db::open_memory();
+        history::save_token(&conn, "tok", "t").unwrap();
+        seed_booking(&conn, "55");
+        let fake = Fake::default();
+        fake.push(400, r#"{"message":"Cancellation window has passed"}"#);
+        let err = cancel_booking(&conn, &cfg(), &fake, "55").unwrap_err();
+
+        assert_eq!(err, "Cancellation window has passed");
+        assert_eq!(bookings_left(&conn), 1);
+        let status: String = conn
+            .query_row("SELECT status FROM pickle_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "error");
+    }
+
+    #[test]
+    fn cancel_booking_survives_a_failing_resync() {
+        use api::testing::{cfg, Fake};
+        let conn = crate::db::open_memory();
+        history::save_token(&conn, "tok", "t").unwrap();
+        seed_booking(&conn, "55");
+        let fake = Fake::default();
+        fake.push(200, r#"{"message":"Success"}"#);
+        for _ in 0..2 {
+            fake.responses
+                .borrow_mut()
+                .push_back(Err("connection refused".to_string()));
+        }
+        cancel_booking(&conn, &cfg(), &fake, "55").unwrap();
+        assert_eq!(bookings_left(&conn), 0);
     }
 }
