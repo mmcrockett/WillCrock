@@ -106,6 +106,14 @@ body {
   color: #fff;
 }
 
+.side-link.locked,
+.side-link.locked:hover {
+  background: none;
+  color: rgba(255, 255, 255, 0.88);
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 .side-link.active {
   background: rgba(255, 255, 255, 0.14);
   border-left-color: var(--crest-gold);
@@ -249,6 +257,16 @@ body {
 .tile:hover .tile-box {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
   transform: translateY(-2px);
+}
+
+.tile.locked {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.tile.locked:hover .tile-box {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  transform: none;
 }
 
 .page-title {
