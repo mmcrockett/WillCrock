@@ -1,5 +1,6 @@
 use crate::auth::{Feature, User};
 use crate::config::Quackr;
+use crate::photos;
 use crate::pickle::dashboard::{self, Dashboard};
 use crate::sms::{self, Sms};
 use crate::trips::{self, Item, Kind, Trip};
@@ -805,6 +806,53 @@ pub fn placeholder(user: &User, features: Features, feature: Feature) -> String 
     )
 }
 
+pub fn photos(user: &User, features: Features, summary: Option<&photos::Summary>) -> String {
+    let body = match summary {
+        None => "<div class=\"card shadow-sm\"><div class=\"card-body\">\
+                 Photos are not configured.</div></div>"
+            .to_string(),
+        Some(s) => {
+            let rows: String = s
+                .albums
+                .iter()
+                .map(|a| {
+                    format!(
+                        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        if a.name.is_empty() {
+                            "(top level)".to_string()
+                        } else {
+                            esc(&a.name)
+                        },
+                        esc(a.taken_on.as_deref().unwrap_or("")),
+                        a.count
+                    )
+                })
+                .collect();
+            let missing = if s.missing > 0 {
+                format!(", {} missing from disk", s.missing)
+            } else {
+                String::new()
+            };
+            format!(
+                "<p class=\"text-body-secondary small\">{} photos in {} albums{missing}.</p>\
+                 <div class=\"card shadow-sm\"><div class=\"table-responsive\">\
+                 <table class=\"table table-hover align-middle mb-0\">\
+                 <thead><tr><th>Album</th><th>Date</th><th>Photos</th></tr></thead>\
+                 <tbody>{rows}</tbody></table></div></div>",
+                s.total,
+                s.albums.len()
+            )
+        }
+    };
+    app_page(
+        "Photos",
+        "photos",
+        user,
+        features,
+        &format!("{}{body}", page_title("Photos")),
+    )
+}
+
 pub fn not_found() -> String {
     card_page("Not found", "<a href=\"/\">Home</a>")
 }
@@ -1274,5 +1322,33 @@ mod tests {
         assert!(html.contains("<option value=\"map\" selected>Map</option>"));
         assert!(html.contains("data-msg=\"Delete Dinner?\""));
         assert!(html.contains("Delete Galveston &lt;b&gt; and all its items?"));
+    }
+
+    #[test]
+    fn photos_page_lists_escaped_albums() {
+        let u = user(1, "mike", true);
+        let none = photos(&u, Features::default(), None);
+        assert!(none.contains("not configured"));
+        let summary = photos::Summary {
+            albums: vec![
+                photos::Album {
+                    name: "2018/<b>Trip</b>".into(),
+                    count: 4,
+                    taken_on: Some("2018-03-15".into()),
+                },
+                photos::Album {
+                    name: String::new(),
+                    count: 1,
+                    taken_on: None,
+                },
+            ],
+            total: 5,
+            missing: 2,
+        };
+        let html = photos(&u, Features::default(), Some(&summary));
+        assert!(html.contains("2018/&lt;b&gt;Trip&lt;/b&gt;"));
+        assert!(html.contains("(top level)"));
+        assert!(html.contains("5 photos in 2 albums, 2 missing from disk"));
+        assert!(html.contains("side-link active\" href=\"/photos\""));
     }
 }

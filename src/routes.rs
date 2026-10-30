@@ -1,7 +1,7 @@
 use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
-use crate::{log, mail, pages, pickle, sms, trips};
+use crate::{log, mail, pages, photos, pickle, sms, trips};
 use rusqlite::Connection;
 
 fn features(cfg: &Config) -> pages::Features {
@@ -71,9 +71,18 @@ fn authed(
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
         ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
         ("GET", ["pickle"]) if user.can(Feature::Pickle) => pickle_page(conn, cfg, user, now),
-        ("GET", [page @ ("recipes" | "photos")])
-            if Feature::parse(page).is_some_and(|f| user.can(f)) =>
-        {
+        ("GET", ["photos"]) if user.can(Feature::Photos) => {
+            let summary = if cfg.photos.is_some() {
+                Some(photos::summary(conn)?)
+            } else {
+                None
+            };
+            Ok(Resp::html(
+                200,
+                pages::photos(user, features(cfg), summary.as_ref()),
+            ))
+        }
+        ("GET", [page @ "recipes"]) if Feature::parse(page).is_some_and(|f| user.can(f)) => {
             let feature = Feature::parse(page).expect("matched above");
             Ok(Resp::html(
                 200,

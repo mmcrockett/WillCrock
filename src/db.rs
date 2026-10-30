@@ -95,6 +95,21 @@ CREATE TABLE trip_items (
 );
 CREATE INDEX trip_items_trip_id ON trip_items(trip_id, position);
 ",
+    "
+CREATE TABLE photos (
+  id INTEGER PRIMARY KEY,
+  path TEXT NOT NULL UNIQUE,
+  album TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  mtime INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  taken_on TEXT,
+  created_at INTEGER NOT NULL,
+  missing_at INTEGER
+);
+CREATE INDEX photos_album ON photos(album);
+CREATE INDEX photos_sha256 ON photos(sha256);
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
