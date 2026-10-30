@@ -112,9 +112,9 @@ fn app_page(title: &str, active: &str, user: &User, has_sms: bool, body: &str) -
             ICON_USERS,
             active == "users",
         ));
-        if has_sms {
-            links.push_str(&side_link("/sms", "SMS", ICON_SMS, active == "sms"));
-        }
+    }
+    if has_sms {
+        links.push_str(&side_link("/sms", "SMS", ICON_SMS, active == "sms"));
     }
     shell(
         title,
@@ -204,9 +204,9 @@ pub fn home(user: &User, has_sms: bool) -> String {
     let mut tiles = String::new();
     if user.is_admin {
         tiles.push_str(&tile("/admin/users", "Users", ICON_USERS));
-        if has_sms {
-            tiles.push_str(&tile("/sms", "SMS", ICON_SMS));
-        }
+    }
+    if has_sms {
+        tiles.push_str(&tile("/sms", "SMS", ICON_SMS));
     }
     app_page(
         "Home",
@@ -435,13 +435,16 @@ mod tests {
     }
 
     #[test]
-    fn sms_link_needs_admin_and_config() {
+    fn sms_link_needs_config() {
         let admin = user(1, "mike", true);
+        let member = user(2, "sam", false);
         assert!(!home(&admin, false).contains("/sms"));
-        assert!(!home(&user(2, "sam", false), true).contains("/sms"));
-        let html = home(&admin, true);
-        assert!(html.contains("side-link\" href=\"/sms\""));
-        assert!(html.contains("class=\"tile\" href=\"/sms\""));
+        assert!(!home(&member, false).contains("/sms"));
+        for u in [&admin, &member] {
+            let html = home(u, true);
+            assert!(html.contains("side-link\" href=\"/sms\""));
+            assert!(html.contains("class=\"tile\" href=\"/sms\""));
+        }
     }
 
     #[test]
