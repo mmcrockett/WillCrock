@@ -1,7 +1,7 @@
 use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
-use crate::{log, mail, pages, pickle, sms};
+use crate::{log, mail, pages, pickle, sms, trips};
 use rusqlite::Connection;
 
 fn features(cfg: &Config) -> pages::Features {
@@ -71,7 +71,7 @@ fn authed(
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
         ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
         ("GET", ["pickle"]) if user.can(Feature::Pickle) => pickle_page(conn, cfg, user, now),
-        ("GET", [page @ ("recipes" | "photos" | "trips")])
+        ("GET", [page @ ("recipes" | "photos")])
             if Feature::parse(page).is_some_and(|f| user.can(f)) =>
         {
             let feature = Feature::parse(page).expect("matched above");
@@ -79,6 +79,9 @@ fn authed(
                 200,
                 pages::placeholder(user, features(cfg), feature),
             ))
+        }
+        (_, ["trips", rest @ ..]) if user.can(Feature::Trips) => {
+            trips_route(conn, cfg, req, user, rest, now)
         }
         ("POST", ["pickle", "bookings", id, "cancel"]) if user.can(Feature::Pickle) => {
             pickle_cancel(conn, cfg, user, id)
@@ -137,6 +140,120 @@ fn sms_page(cfg: &Config, user: &User) -> Resp {
         200,
         pages::sms(user, features(cfg), quackr, messages.as_deref()),
     )
+}
+
+fn trips_route(
+    conn: &Connection,
+    cfg: &Config,
+    req: &Req,
+    user: &User,
+    segs: &[&str],
+    now: i64,
+) -> rusqlite::Result<Resp> {
+    let feats = features(cfg);
+    let not_found = || Ok(Resp::html(404, pages::not_found()));
+    let form = |key: &str| req.form.get(key).map(String::as_str).unwrap_or("");
+    let trip_input = || trips::parse_trip(form("location"), form("start"), form("end"));
+    let item_input = || trips::parse_item(form("kind"), form("label"), form("value"));
+
+    let (method, id, rest) = match (req.method.as_str(), segs) {
+        ("GET", []) => {
+            let (upcoming, past) = trips::list(conn, trips::today(now))?;
+            return Ok(Resp::html(
+                200,
+                pages::trips_index(user, feats, &upcoming, &past, None),
+            ));
+        }
+        ("POST", []) => {
+            return match trip_input() {
+                Ok(input) => {
+                    let id = trips::create(conn, &input, now)?;
+                    Ok(Resp::redirect(&format!("/trips/{id}/edit")))
+                }
+                Err(e) => {
+                    let (upcoming, past) = trips::list(conn, trips::today(now))?;
+                    Ok(Resp::html(
+                        400,
+                        pages::trips_index(user, feats, &upcoming, &past, Some(&e)),
+                    ))
+                }
+            };
+        }
+        (method, [id, rest @ ..]) => (method, id, rest),
+        _ => return not_found(),
+    };
+    let Ok(id) = id.parse::<i64>() else {
+        return not_found();
+    };
+    let Some(trip) = trips::get(conn, id)? else {
+        return not_found();
+    };
+    let edit_url = format!("/trips/{id}/edit");
+    let edit_page = |status: u16, error: Option<&str>| -> rusqlite::Result<Resp> {
+        let items = trips::items(conn, id)?;
+        Ok(Resp::html(
+            status,
+            pages::trip_edit(user, feats, &trip, &items, error),
+        ))
+    };
+    let done = |result: Result<(), String>| match result {
+        Ok(()) => Ok(Resp::redirect(&edit_url)),
+        Err(e) => edit_page(400, Some(&e)),
+    };
+
+    match (method, rest) {
+        ("GET", []) => {
+            let items = trips::items(conn, id)?;
+            Ok(Resp::html(
+                200,
+                pages::trip_view(user, feats, &trip, &items),
+            ))
+        }
+        ("GET", ["edit"]) => edit_page(200, None),
+        ("POST", []) => match trip_input() {
+            Ok(input) => {
+                trips::update(conn, id, &input)?;
+                Ok(Resp::redirect(&edit_url))
+            }
+            Err(e) => edit_page(400, Some(&e)),
+        },
+        ("POST", ["delete"]) => {
+            trips::delete(conn, id)?;
+            Ok(Resp::redirect("/trips"))
+        }
+        ("POST", ["items"]) => match item_input() {
+            Ok(input) => {
+                trips::add_item(conn, id, &input)?;
+                done(Ok(()))
+            }
+            Err(e) => done(Err(e)),
+        },
+        ("POST", ["items", item]) => {
+            let Ok(item) = item.parse::<i64>() else {
+                return not_found();
+            };
+            match item_input() {
+                Ok(input) if trips::update_item(conn, id, item, &input)? == 0 => not_found(),
+                Ok(_) => done(Ok(())),
+                Err(e) => done(Err(e)),
+            }
+        }
+        ("POST", ["items", item, action @ ("delete" | "up" | "down")]) => {
+            let Ok(item) = item.parse::<i64>() else {
+                return not_found();
+            };
+            let found = match *action {
+                "delete" => trips::delete_item(conn, id, item)? > 0,
+                up_or_down => trips::move_item(conn, id, item, up_or_down == "up")?,
+            };
+            if found {
+                done(Ok(()))
+            } else {
+                not_found()
+            }
+        }
+        _ => not_found(),
+    }
 }
 
 fn pickle_page(conn: &Connection, cfg: &Config, user: &User, now: i64) -> rusqlite::Result<Resp> {

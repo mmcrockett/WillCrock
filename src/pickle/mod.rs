@@ -2,7 +2,7 @@ mod api;
 pub mod dashboard;
 mod history;
 mod ops;
-mod time;
+pub mod time;
 
 use crate::{cli, config, db};
 pub use api::UreqTransport;

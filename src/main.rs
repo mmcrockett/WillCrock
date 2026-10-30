@@ -9,6 +9,7 @@ mod pages;
 mod pickle;
 mod routes;
 mod sms;
+mod trips;
 
 use std::sync::Arc;
 
