@@ -8,6 +8,10 @@ pub fn iso(ts: Timestamp) -> String {
         .unwrap_or_default()
 }
 
+pub fn iso_millis(ts: Timestamp) -> String {
+    ts.strftime("%Y-%m-%dT%H:%M:%S.%3fZ").to_string()
+}
+
 pub fn plus_millis(ts: Timestamp, ms: i64) -> Timestamp {
     Timestamp::from_millisecond(ts.as_millisecond() + ms).unwrap_or(ts)
 }

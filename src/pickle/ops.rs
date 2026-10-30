@@ -14,6 +14,7 @@ const COURTS: [(&str, i64); 5] = [
 ];
 const ANY_COURTS: [i64; 4] = [1178, 1179, 1180, 1181];
 const LOCATION_ID: &str = "134";
+const BUSINESS_ID: i64 = 120;
 const CHECKIN_WINDOW_BEFORE_MIN: f64 = 60.0;
 const CHECKIN_WINDOW_AFTER_MIN: f64 = 150.0;
 const BOOKING_OPEN_HOUR_CENTRAL: i8 = 6;
@@ -84,27 +85,16 @@ fn court_name(ids: &[i64]) -> String {
         .join(", ")
 }
 
-fn reserve_body(
-    start: Timestamp,
-    end: Timestamp,
-    courts: &[i64],
-    member_id: &str,
-    full_name: &str,
-) -> Value {
+fn reserve_body(start: Timestamp, end: Timestamp, courts: &[i64], member_id: &str) -> Value {
     json!({
-        "start_time": time::iso(start),
-        "end_time": time::iso(end),
-        "instantBook": true,
+        "business_id": BUSINESS_ID,
         "courts": courts,
-        "userId": member_id,
-        "force": false,
-        "sport_id": "1",
-        "fullName": full_name,
-        "assigned": [],
-        "tags": [],
-        "partners": [],
+        "startDate": time::iso_millis(start),
+        "endDate": time::iso_millis(end),
         "guests": [],
-        "add_on_id": null,
+        "partners": [],
+        "sport_id": "1",
+        "userId": member_id,
     })
 }
 
@@ -139,32 +129,12 @@ pub fn pick_checkin(bookings: &[BookingInfo], now: Timestamp) -> Option<&Booking
 
 impl Client<'_> {
     fn fetch_booking_list(&mut self, context: &str) -> Res<Vec<Value>> {
-        let now = self.now();
-        let body = json!({
-            "startDate": time::rfc3339_offset(&time::central_at(now, 0, 0, 0)?),
-            "endDate": time::rfc3339_offset(&time::central_at(now, 7, 23, 0)?),
-            "type": "0",
-            "is_coach": false,
-        });
-        let path = format!("{API}/members/booking/{}", self.cfg.member_id);
-        let resp = self.request(&Req::post(&path, context, body))?;
+        let path = format!("{API}/appointment/booked?sport_id=1&location_id={LOCATION_ID}");
+        let resp = self.request(&Req::get(&path, context))?;
         Ok(resp
             .json()
-            .and_then(|v| v.pointer("/payload/bookings_history")?.as_array().cloned())
+            .and_then(|v| v.get("payload")?.as_array().cloned())
             .unwrap_or_default())
-    }
-
-    fn booking_detail(&mut self, id: &str) -> Res<(bool, String)> {
-        let path = format!("{API}/appointment/get/{id}");
-        let resp = self.request(&Req::get(&path, "booking"))?;
-        let payload = resp
-            .json()
-            .and_then(|v| v.get("payload").cloned())
-            .ok_or_else(|| format!("booking {id}: response missing payload"))?;
-        Ok((
-            non_empty(payload.get("checkins")),
-            opt_string(payload.get("start_time")).unwrap_or_default(),
-        ))
     }
 
     fn bookings(&mut self) -> Res<Vec<BookingInfo>> {
@@ -173,12 +143,10 @@ impl Client<'_> {
         }
         let mut out = Vec::new();
         for appt in self.fetch_booking_list("bookings")? {
-            let id = opt_string(appt.get("id")).ok_or("booking without an id")?;
-            let (has_checkin, _) = self.booking_detail(&id)?;
             out.push(BookingInfo {
-                id,
-                court: opt_string(appt.get("court_names")),
-                has_checkin,
+                id: opt_string(appt.get("appointment_id")).ok_or("booking without an id")?,
+                court: opt_string(appt.get("court_name")),
+                has_checkin: non_empty(appt.get("checkins")),
                 start_time: opt_string(appt.get("start_time")).unwrap_or_default(),
                 end_time: opt_string(appt.get("end_time")).unwrap_or_default(),
             });
@@ -309,18 +277,12 @@ impl Client<'_> {
         let mut retries: u32 = 0;
         let mut last = None;
         for courts in &attempts {
-            let body = reserve_body(
-                start_ts,
-                end_ts,
-                courts,
-                &self.cfg.member_id,
-                &self.cfg.full_name,
-            );
+            let body = reserve_body(start_ts, end_ts, courts, &self.cfg.member_id);
             println!("rattempt: {}", time::iso(self.now()));
             println!("rrequest: {body}");
 
             let retries_before = retries;
-            let book_path = format!("{API}/appointment/add_book");
+            let book_path = format!("{API}/appointment/add");
             let resp = loop {
                 let req = if dry_run {
                     Req::get("", "reserve")
@@ -359,24 +321,30 @@ impl Client<'_> {
 
     pub fn cancel(&mut self, id: &str, confirm_date: Option<&str>) -> Res<CancelOutcome> {
         if let Some(date) = confirm_date {
-            let (_, start) = self.booking_detail(id)?;
-            let actual = time::central(time::parse(&start)?)?
-                .strftime("%Y%m%d")
-                .to_string();
-            if actual != date {
+            let start = self
+                .bookings()?
+                .into_iter()
+                .find(|b| b.id == id)
+                .map(|b| b.start_time);
+            let actual = match start {
+                Some(s) => Some(
+                    time::central(time::parse(&s)?)?
+                        .strftime("%Y%m%d")
+                        .to_string(),
+                ),
+                None => None,
+            };
+            if actual.as_deref() != Some(date) {
                 self.fail_note(format!("cancel {id}: not allowed"));
                 return Ok(CancelOutcome::NotAllowed);
             }
         }
 
         let resp = self.call(
-            &Req::post(
-                &format!("{API}/appointment/cancel/{id}"),
-                "cancel",
-                json!({ "cancel_for": "court", "apt_id": id }),
-            ),
+            &Req::delete(&format!("{API}/appointment/cancel/{id}"), "cancel"),
             1,
         )?;
+        self.bookings_cache = None;
         if resp.ok() {
             self.note(format!("cancelled {id}"));
         } else {
@@ -457,9 +425,13 @@ mod tests {
         assert_eq!(calls.len(), 2);
         let second: Value = serde_json::from_str(calls[1].body.as_ref().unwrap()).unwrap();
         assert_eq!(second["courts"], json!([1179]));
-        assert_eq!(second["start_time"], "2026-10-19T12:30:00Z");
-        assert_eq!(second["end_time"], "2026-10-19T14:00:00Z");
+        assert_eq!(second["startDate"], "2026-10-19T12:30:00.000Z");
+        assert_eq!(second["endDate"], "2026-10-19T14:00:00.000Z");
         assert_eq!(second["userId"], "176064");
+        assert_eq!(second["business_id"], 120);
+        assert_eq!(second["sport_id"], "1");
+        assert!(second.get("start_time").is_none());
+        assert_eq!(calls[1].path, "/api/v1/appointment/add");
         drop(calls);
         assert_eq!(c.notes, ["booked Mon Oct 19 7:30-9:00am any court"]);
         assert_eq!(c.details, ["5C: Overlap Error", "5D: ok"]);
@@ -562,7 +534,7 @@ mod tests {
                 court: "5C".into(),
             },
         ];
-        fake.push(200, r#"{"payload":{"bookings_history":[]}}"#);
+        fake.push(200, r#"{"payload":[]}"#);
         fake.push(200, r#"{"message":"ok"}"#);
         let (mut c, clock) = client(&fake, &conn, &cfg, "2026-10-17T10:55:00Z");
         let resps = c.reserve_today(false).unwrap();
@@ -572,8 +544,8 @@ mod tests {
         assert_eq!(
             fake.paths(),
             [
-                "/api/v1/members/booking/176064",
-                "/api/v1/appointment/add_book"
+                "/api/v1/appointment/booked?sport_id=1&location_id=134",
+                "/api/v1/appointment/add"
             ]
         );
         assert_eq!(c.notes, ["booked Sat Oct 24 10:00-11:00am court 5C"]);
@@ -600,7 +572,7 @@ mod tests {
 
         let paths = fake.paths();
         assert_eq!(paths[3], "/api/v1/auth/login");
-        assert_eq!(paths[4], "/api/v1/appointment/add_book");
+        assert_eq!(paths[4], "/api/v1/appointment/add");
         assert!(c.details[0].starts_with("warmup failed: request failed after 3 attempts"));
         assert_eq!(c.notes, ["booked Sat Oct 24 10:00-11:00am court 5C"]);
         assert!(!c.failed);
@@ -617,45 +589,67 @@ mod tests {
         assert!(clock.slept.borrow().is_empty());
     }
 
+    const ONE_BOOKING: &str = r#"{"payload":[{"appointment_id":"55","court_name":"5C",
+        "start_time":"2026-10-19T03:00:00.000Z","end_time":"2026-10-19T04:30:00.000Z","checkins":[]}]}"#;
+
     #[test]
     fn cancel_refuses_a_mismatched_date() {
         let conn = open_memory();
         let (fake, cfg) = (Fake::default(), cfg());
         with_token(&conn);
-        fake.push(
-            200,
-            r#"{"payload":{"checkins":[],"start_time":"2026-10-19T03:00:00.000Z"}}"#,
-        );
+        fake.push(200, ONE_BOOKING);
         let (mut c, _) = client(&fake, &conn, &cfg, MONDAY_6AM);
         let out = c.cancel("55", Some("20261019")).unwrap();
 
         assert!(matches!(out, CancelOutcome::NotAllowed));
-        assert_eq!(fake.paths(), ["/api/v1/appointment/get/55"]);
+        assert_eq!(
+            fake.paths(),
+            ["/api/v1/appointment/booked?sport_id=1&location_id=134"]
+        );
         assert!(c.failed);
     }
 
     #[test]
-    fn cancel_posts_when_the_central_date_matches() {
+    fn cancel_refuses_an_unknown_booking() {
         let conn = open_memory();
         let (fake, cfg) = (Fake::default(), cfg());
         with_token(&conn);
-        fake.push(
-            200,
-            r#"{"payload":{"checkins":[],"start_time":"2026-10-19T03:00:00.000Z"}}"#,
-        );
-        fake.push(200, r#"{"message":"cancelled"}"#);
+        fake.push(200, ONE_BOOKING);
+        let (mut c, _) = client(&fake, &conn, &cfg, MONDAY_6AM);
+        let out = c.cancel("99", Some("20261018")).unwrap();
+
+        assert!(matches!(out, CancelOutcome::NotAllowed));
+        assert_eq!(fake.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn cancel_deletes_when_the_central_date_matches() {
+        let conn = open_memory();
+        let (fake, cfg) = (Fake::default(), cfg());
+        with_token(&conn);
+        fake.push(200, ONE_BOOKING);
+        fake.push(200, r#"{"message":"Success"}"#);
         let (mut c, _) = client(&fake, &conn, &cfg, MONDAY_6AM);
         let out = c.cancel("55", Some("20261018")).unwrap();
 
         assert!(matches!(out, CancelOutcome::Done(r) if r.ok()));
         let calls = fake.calls.borrow();
+        assert_eq!(calls[1].method, Method::Delete);
         assert_eq!(calls[1].path, "/api/v1/appointment/cancel/55");
-        assert_eq!(
-            serde_json::from_str::<Value>(calls[1].body.as_ref().unwrap()).unwrap(),
-            json!({"cancel_for": "court", "apt_id": "55"})
-        );
+        assert_eq!(calls[1].body, None);
         drop(calls);
         assert_eq!(c.notes, ["cancelled 55"]);
+    }
+
+    #[test]
+    fn cancel_without_a_date_skips_the_lookup() {
+        let conn = open_memory();
+        let (fake, cfg) = (Fake::default(), cfg());
+        with_token(&conn);
+        fake.push(200, r#"{"message":"Success"}"#);
+        let (mut c, _) = client(&fake, &conn, &cfg, MONDAY_6AM);
+        c.cancel("55", None).unwrap();
+        assert_eq!(fake.paths(), ["/api/v1/appointment/cancel/55"]);
     }
 
     #[test]
@@ -665,20 +659,15 @@ mod tests {
         with_token(&conn);
         fake.push(
             200,
-            r#"{"payload":{"bookings_history":[{"id":5,"court_names":"6B",
-                "start_time":"2026-10-18T13:30:00.000Z","end_time":"2026-10-18T15:00:00.000Z"}]}}"#,
+            r#"{"payload":[{"appointment_id":"5","court_name":"6B",
+                "start_time":"2026-10-18T13:30:00.000Z","end_time":"2026-10-18T15:00:00.000Z","checkins":[]}]}"#,
         );
-        fake.push(200, r#"{"payload":{"checkins":null,"start_time":"x"}}"#);
         fake.push(200, r#"{"ok":true}"#);
         fake.push(200, r#"{"ok":true}"#);
         fake.push(
             200,
-            r#"{"payload":{"bookings_history":[{"id":5,"court_names":"6B",
-                "start_time":"2026-10-18T13:30:00.000Z","end_time":"2026-10-18T15:00:00.000Z"}]}}"#,
-        );
-        fake.push(
-            200,
-            r#"{"payload":{"checkins":[{"id":1}],"start_time":"x"}}"#,
+            r#"{"payload":[{"appointment_id":"5","court_name":"6B",
+                "start_time":"2026-10-18T13:30:00.000Z","end_time":"2026-10-18T15:00:00.000Z","checkins":[{"id":1}]}]}"#,
         );
         let (mut c, _) = client(&fake, &conn, &cfg, "2026-10-18T13:00:00Z");
         c.sync().unwrap();
@@ -686,12 +675,10 @@ mod tests {
         assert_eq!(
             fake.paths(),
             [
-                "/api/v1/members/booking/176064",
-                "/api/v1/appointment/get/5",
+                "/api/v1/appointment/booked?sport_id=1&location_id=134",
                 "/api/v1/checkin",
                 "/api/v1/members_checkin/addcheckin/5",
-                "/api/v1/members/booking/176064",
-                "/api/v1/appointment/get/5",
+                "/api/v1/appointment/booked?sport_id=1&location_id=134",
             ]
         );
         assert_eq!(c.notes, ["checked in Sun Oct 18 8:30am"]);
