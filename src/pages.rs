@@ -620,13 +620,7 @@ fn trip_button(t: &Trip) -> String {
     )
 }
 
-pub fn trips_index(
-    user: &User,
-    features: Features,
-    upcoming: &[Trip],
-    past: &[Trip],
-    error: Option<&str>,
-) -> String {
+pub fn trips_index(user: &User, features: Features, upcoming: &[Trip], past: &[Trip]) -> String {
     let list: String = if upcoming.is_empty() {
         "<p class=\"text-body-secondary\">No trips yet.</p>".to_string()
     } else {
@@ -647,16 +641,31 @@ pub fn trips_index(
         user,
         features,
         &format!(
-            "{}{}{list}{past}\
-             <div class=\"card shadow-sm\"><div class=\"card-body\">\
-             <h2 class=\"h5 mb-3\">New trip</h2>\
+            "<div class=\"d-flex align-items-baseline justify-content-between gap-3\">{}\
+             <a class=\"btn btn-primary\" href=\"/trips/new\" aria-label=\"New trip\">+</a></div>\
+             {list}{past}",
+            page_title("Trips"),
+        ),
+    )
+}
+
+pub fn trip_new(user: &User, features: Features, error: Option<&str>) -> String {
+    app_page(
+        "New trip",
+        "trips",
+        user,
+        features,
+        &format!(
+            "{}{}\
+             <div class=\"card shadow-sm mb-3\"><div class=\"card-body\">\
              <form method=\"post\" action=\"/trips\" class=\"row g-2 align-items-center\">\
              <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"location\" placeholder=\"Location\" required></div>\
              <div class=\"col-6 col-md-auto\"><input class=\"form-control\" type=\"date\" name=\"start\" required></div>\
              <div class=\"col-6 col-md-auto\"><input class=\"form-control\" type=\"date\" name=\"end\" required></div>\
              <div class=\"col-auto\"><button class=\"btn btn-primary\">Add</button></div>\
-             </form></div></div>",
-            page_title("Trips"),
+             </form></div></div>\
+             <a href=\"/trips\">&larr; All trips</a>",
+            page_title("New trip"),
             alert(error),
         ),
     )
@@ -714,14 +723,15 @@ fn kind_options(selected: Kind) -> String {
         .collect()
 }
 
-fn item_fields(kind: Kind, label: &str, value: &str) -> String {
+fn item_fields(kind: Kind, label: &str, value: &str, autotag: bool) -> String {
     format!(
-        "<div class=\"col-4 col-md-2\"><select class=\"form-select\" name=\"kind\">{}</select></div>\
-         <div class=\"col-8 col-md-3\"><input class=\"form-control\" name=\"label\" placeholder=\"Label\" value=\"{}\"></div>\
-         <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"value\" placeholder=\"Link URL, address, or text\" value=\"{}\" required></div>",
-        kind_options(kind),
+        "<div class=\"col-12 col-md-3\"><input class=\"form-control\" name=\"label\" placeholder=\"Title\" aria-label=\"Title\" value=\"{}\"></div>\
+         <div class=\"col-8 col-md\"><input class=\"form-control\" name=\"value\" placeholder=\"Info\" aria-label=\"Info\" value=\"{}\" required></div>\
+         <div class=\"col-4 col-md-2\"><select class=\"form-select\" name=\"kind\" aria-label=\"Tag\"{}>{}</select></div>",
         esc(label),
         esc(value),
+        if autotag { " data-autotag" } else { "" },
+        kind_options(kind),
     )
 }
 
@@ -741,7 +751,7 @@ fn item_edit(trip_id: i64, i: &Item, first: bool, last: bool) -> String {
          <button class=\"btn btn-outline-danger\" formaction=\"{action}/delete\" formnovalidate \
          onclick=\"return confirm(this.dataset.msg)\" data-msg=\"{msg}\">Delete</button>\
          </div></div></form>",
-        fields = item_fields(i.kind, i.label.as_deref().unwrap_or(""), &i.value),
+        fields = item_fields(i.kind, i.label.as_deref().unwrap_or(""), &i.value, false),
         up = step("up", "&uarr;", first),
         down = step("down", "&darr;", last),
         msg = esc(&format!("Delete {}?", i.display_label())),
@@ -780,14 +790,16 @@ pub fn trip_edit(
              <div class=\"d-flex justify-content-between align-items-center\">\
              <a href=\"/trips/{id}\">&larr; Done</a>\
              <form method=\"post\" action=\"/trips/{id}/delete\" onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"{msg}\">\
-             <button class=\"btn btn-sm btn-outline-danger\">Delete trip</button></form></div>",
+             <button class=\"btn btn-sm btn-outline-danger\">Delete trip</button></form></div>\
+             <script src=\"{js}\" defer></script>",
+            js = asset("/static/trips.js"),
             title = page_title(&trips::title(trip)),
             err = alert(error),
             id = trip.id,
             loc = esc(&trip.location),
             start = trip.start,
             end = trip.end,
-            new_fields = item_fields(Kind::Link, "", ""),
+            new_fields = item_fields(Kind::Note, "", "", true),
             msg = esc(&format!("Delete {} and all its items?", trip.location)),
         ),
     )
@@ -1267,17 +1279,27 @@ mod tests {
     #[test]
     fn trips_index_lists_buttons_and_collapses_past() {
         let u = user(1, "mike", true);
-        let empty = trips_index(&u, Features::default(), &[], &[], None);
+        let empty = trips_index(&u, Features::default(), &[], &[]);
         assert!(empty.contains("No trips yet."));
         assert!(empty.contains("side-link active\" href=\"/trips\""));
         assert!(!empty.contains("Past trips"));
         let one = [sample_trip()];
-        let html = trips_index(&u, Features::default(), &one, &one, Some("<oops>"));
+        let html = trips_index(&u, Features::default(), &one, &one);
         assert!(html.contains("href=\"/trips/7\""));
+        assert!(html.contains("href=\"/trips/new\""));
+        assert!(!html.contains("action=\"/trips\""));
         assert!(html.contains("Jun 21-26, 2026"));
         assert!(html.contains("Past trips</summary>"));
-        assert!(html.contains("&lt;oops&gt;"));
         assert!(!html.contains("<b>"));
+    }
+
+    #[test]
+    fn trip_new_posts_to_trips_and_shows_errors() {
+        let u = user(1, "mike", true);
+        let html = trip_new(&u, Features::default(), Some("<oops>"));
+        assert!(html.contains("action=\"/trips\""));
+        assert!(html.contains("&lt;oops&gt;"));
+        assert!(html.contains("href=\"/trips\">&larr; All trips"));
     }
 
     #[test]
@@ -1320,6 +1342,10 @@ mod tests {
             "formaction=\"/trips/7/items/1/up\" formnovalidate aria-label=\"Move up\" disabled"
         ));
         assert!(html.contains("<option value=\"map\" selected>Map</option>"));
+        assert_eq!(html.matches("data-autotag").count(), 1);
+        assert!(html.contains("placeholder=\"Title\""));
+        assert!(html.contains("placeholder=\"Info\""));
+        assert!(html.contains("/static/trips.js?v="));
         assert!(html.contains("data-msg=\"Delete Dinner?\""));
         assert!(html.contains("Delete Galveston &lt;b&gt; and all its items?"));
     }

@@ -102,14 +102,20 @@ pub fn parse_item(kind: &str, label: &str, value: &str) -> Result<ItemInput, Str
     if value.is_empty() {
         return Err("Value is required.".into());
     }
-    if kind == Kind::Link && !has_link_scheme(value) {
-        return Err("Links must start with http:, https:, tel:, mailto:, sms: or geo:.".into());
+    let mut value = value.to_string();
+    if kind == Kind::Link && !has_link_scheme(&value) {
+        if value.contains(':') || value.contains(char::is_whitespace) {
+            return Err(
+                "Links must be a web address or start with tel:, mailto:, sms: or geo:.".into(),
+            );
+        }
+        value = format!("https://{value}");
     }
     let label = label.trim();
     Ok(ItemInput {
         kind,
         label: (!label.is_empty()).then(|| label.to_string()),
-        value: value.to_string(),
+        value,
     })
 }
 
@@ -431,7 +437,16 @@ mod tests {
         assert!(parse_trip("A", "2026-06-02", "2026-06-02").is_ok());
         assert!(parse_item("link", "", "javascript:alert(1)").is_err());
         assert!(parse_item("link", "", "JavaScript:alert(1)").is_err());
-        assert!(parse_item("link", "", "example.com").is_err());
+        assert!(parse_item("link", "", "javascript:alert(document.cookie)").is_err());
+        assert!(parse_item("link", "", "two words").is_err());
+        assert_eq!(
+            parse_item("link", "", "example.com").unwrap().value,
+            "https://example.com"
+        );
+        assert_eq!(
+            parse_item("link", "", "www.example.com/x").unwrap().value,
+            "https://www.example.com/x"
+        );
         assert!(parse_item("link", "", "tel:+15551234567").is_ok());
         assert!(parse_item("map", "", "  ").is_err());
         assert!(parse_item("bogus", "", "x").is_err());

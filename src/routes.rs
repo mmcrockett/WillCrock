@@ -170,22 +170,17 @@ fn trips_route(
             let (upcoming, past) = trips::list(conn, trips::today(now))?;
             return Ok(Resp::html(
                 200,
-                pages::trips_index(user, feats, &upcoming, &past, None),
+                pages::trips_index(user, feats, &upcoming, &past),
             ));
         }
+        ("GET", ["new"]) => return Ok(Resp::html(200, pages::trip_new(user, feats, None))),
         ("POST", []) => {
             return match trip_input() {
                 Ok(input) => {
                     let id = trips::create(conn, &input, now)?;
                     Ok(Resp::redirect(&format!("/trips/{id}/edit")))
                 }
-                Err(e) => {
-                    let (upcoming, past) = trips::list(conn, trips::today(now))?;
-                    Ok(Resp::html(
-                        400,
-                        pages::trips_index(user, feats, &upcoming, &past, Some(&e)),
-                    ))
-                }
+                Err(e) => Ok(Resp::html(400, pages::trip_new(user, feats, Some(&e)))),
             };
         }
         (method, [id, rest @ ..]) => (method, id, rest),
@@ -378,12 +373,18 @@ mod tests {
         assert_eq!(s, 200);
         assert!(html.contains("No trips yet."));
 
+        let (s, html) = call(&conn, &me, "GET", "/trips/new", "");
+        assert_eq!(s, 200);
+        assert!(html.contains("action=\"/trips\""));
+
         let new_trip = "location=Galveston&start=2026-06-21&end=2026-06-26";
         let (s, html) = call(&conn, &me, "POST", "/trips", new_trip);
         assert_eq!(s, 303);
         assert!(html.contains("Location: /trips/1/edit"));
         let blank = "location=&start=2026-06-21&end=2026-06-26";
-        assert_eq!(call(&conn, &me, "POST", "/trips", blank).0, 400);
+        let (s, html) = call(&conn, &me, "POST", "/trips", blank);
+        assert_eq!(s, 400);
+        assert!(html.contains("Location is required."));
 
         for form in [
             "kind=link&label=Hotel&value=https%3A%2F%2Fh.example",
@@ -395,7 +396,7 @@ mod tests {
         let bad = "kind=link&label=&value=javascript%3Aalert(1)";
         let (s, html) = call(&conn, &me, "POST", "/trips/1/items", bad);
         assert_eq!(s, 400);
-        assert!(html.contains("Links must start with"));
+        assert!(html.contains("Links must be"));
 
         let (_, html) = call(&conn, &me, "GET", "/trips/1", "");
         assert!(html.contains("Galveston - Jun 21-26, 2026"));
