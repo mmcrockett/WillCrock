@@ -67,8 +67,11 @@ const ICON_LOGOUT: &str =
     "<path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"/><path d=\"m16 17 5-5-5-5\"/><path d=\"M21 12H9\"/>";
 const ICON_SMS: &str =
     "<path d=\"M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z\"/>";
-const ICON_PADDLE: &str = "<circle cx=\"10\" cy=\"10\" r=\"7\"/><path d=\"m15 15 6 6\"/>\
-    <circle cx=\"8\" cy=\"8\" r=\"0.5\"/><circle cx=\"12\" cy=\"8\" r=\"0.5\"/><circle cx=\"10\" cy=\"12\" r=\"0.5\"/>";
+const ICON_PADDLE: &str = "<g transform=\"rotate(45 12 12)\">\
+    <rect x=\"6.5\" y=\"1.5\" width=\"11\" height=\"13\" rx=\"5.5\"/>\
+    <path d=\"M10.5 14.5V21a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6.5\"/>\
+    <circle cx=\"10\" cy=\"6\" r=\"0.6\"/><circle cx=\"14\" cy=\"6\" r=\"0.6\"/>\
+    <circle cx=\"12\" cy=\"9\" r=\"0.6\"/></g>";
 const ICON_MENU: &str = "<path d=\"M4 6h16M4 12h16M4 18h16\"/>";
 
 fn icon(paths: &str) -> String {
@@ -98,12 +101,67 @@ fn version_label() -> String {
     }
 }
 
+const LOCKED_HINT: &str = "Ask an admin for access";
+
+struct NavItem {
+    key: &'static str,
+    href: &'static str,
+    label: &'static str,
+    icon: &'static str,
+    locked: bool,
+}
+
+fn nav_items(user: &User, features: Features) -> Vec<NavItem> {
+    let mut items = Vec::new();
+    if user.is_admin {
+        items.push(NavItem {
+            key: "users",
+            href: "/admin/users",
+            label: "Users",
+            icon: ICON_USERS,
+            locked: false,
+        });
+    }
+    if features.sms {
+        items.push(NavItem {
+            key: "sms",
+            href: "/sms",
+            label: "SMS",
+            icon: ICON_SMS,
+            locked: !user.can(Feature::Sms),
+        });
+    }
+    if features.pickle {
+        items.push(NavItem {
+            key: "pickle",
+            href: "/pickle",
+            label: "Pickleball",
+            icon: ICON_PADDLE,
+            locked: !user.can(Feature::Pickle),
+        });
+    }
+    items.sort_by_key(|i| i.label.to_lowercase());
+    items
+}
+
 fn side_link(href: &str, label: &str, paths: &str, is_active: bool) -> String {
     format!(
         "<a class=\"side-link{}\" href=\"{href}\">{}{label}</a>",
         if is_active { " active" } else { "" },
         icon(paths)
     )
+}
+
+fn side_item(item: &NavItem, active: &str) -> String {
+    if item.locked {
+        format!(
+            "<span class=\"side-link locked\" aria-disabled=\"true\" title=\"{LOCKED_HINT}\">{}{}</span>",
+            icon(item.icon),
+            item.label
+        )
+    } else {
+        side_link(item.href, item.label, item.icon, active == item.key)
+    }
 }
 
 fn app_page(title: &str, active: &str, user: &User, features: Features, body: &str) -> String {
@@ -114,24 +172,8 @@ fn app_page(title: &str, active: &str, user: &User, features: Features, body: &s
         .map(|c| c.to_uppercase().collect())
         .unwrap_or_default();
     let mut links = side_link("/", "Home", ICON_HOME, active == "home");
-    if user.is_admin {
-        links.push_str(&side_link(
-            "/admin/users",
-            "Users",
-            ICON_USERS,
-            active == "users",
-        ));
-    }
-    if features.sms && user.can(Feature::Sms) {
-        links.push_str(&side_link("/sms", "SMS", ICON_SMS, active == "sms"));
-    }
-    if features.pickle && user.can(Feature::Pickle) {
-        links.push_str(&side_link(
-            "/pickle",
-            "Pickleball",
-            ICON_PADDLE,
-            active == "pickle",
-        ));
+    for item in nav_items(user, features) {
+        links.push_str(&side_item(&item, active));
     }
     shell(
         title,
@@ -171,11 +213,22 @@ fn page_title(title: &str) -> String {
     format!("<h1 class=\"page-title\">{}</h1>", esc(title))
 }
 
-fn tile(href: &str, label: &str, paths: &str) -> String {
-    format!(
-        "<a class=\"tile\" href=\"{href}\"><span class=\"tile-box\">{}</span>{label}</a>",
-        icon(paths)
-    )
+fn tile(item: &NavItem) -> String {
+    if item.locked {
+        format!(
+            "<span class=\"tile locked\" aria-disabled=\"true\" title=\"{LOCKED_HINT}\">\
+             <span class=\"tile-box\">{}</span>{}</span>",
+            icon(item.icon),
+            item.label
+        )
+    } else {
+        format!(
+            "<a class=\"tile\" href=\"{}\"><span class=\"tile-box\">{}</span>{}</a>",
+            item.href,
+            icon(item.icon),
+            item.label
+        )
+    }
 }
 
 pub fn login(msg: Option<&str>) -> String {
@@ -218,16 +271,7 @@ pub fn code(email: &str, error: bool) -> String {
 }
 
 pub fn home(user: &User, features: Features) -> String {
-    let mut tiles = String::new();
-    if user.is_admin {
-        tiles.push_str(&tile("/admin/users", "Users", ICON_USERS));
-    }
-    if features.sms && user.can(Feature::Sms) {
-        tiles.push_str(&tile("/sms", "SMS", ICON_SMS));
-    }
-    if features.pickle && user.can(Feature::Pickle) {
-        tiles.push_str(&tile("/pickle", "Pickleball", ICON_PADDLE));
-    }
+    let tiles: String = nav_items(user, features).iter().map(tile).collect();
     app_page(
         "Home",
         "home",
@@ -673,7 +717,9 @@ mod tests {
     #[test]
     fn sms_link_needs_the_grant() {
         let html = home(&member_with(vec![Feature::Pickle]), sms_on());
-        assert!(!html.contains("/sms"));
+        assert!(!html.contains("href=\"/sms\""));
+        assert!(html.contains("side-link locked"));
+        assert!(html.contains("tile locked"));
     }
 
     #[test]
@@ -760,7 +806,29 @@ mod tests {
     #[test]
     fn pickle_link_hidden_without_the_grant() {
         let html = home(&member_with(vec![Feature::Sms]), pickle_on());
-        assert!(!html.contains("/pickle"));
+        assert!(!html.contains("href=\"/pickle\""));
+        assert!(html.contains("side-link locked"));
+        assert!(html.contains("tile locked"));
+    }
+
+    #[test]
+    fn nav_is_alphabetical_after_home() {
+        let both = Features {
+            sms: true,
+            pickle: true,
+        };
+        let html = home(&user(1, "mike", true), both);
+        let at = |needle: &str| html.find(needle).unwrap();
+        let order = [
+            at("href=\"/\""),
+            at("href=\"/pickle\""),
+            at("href=\"/sms\""),
+            at("href=\"/admin/users\""),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]));
+        let tiles = &html[at("tile-grid")..];
+        assert!(tiles.find("/pickle").unwrap() < tiles.find("/sms").unwrap());
+        assert!(tiles.find("/sms").unwrap() < tiles.find("/admin/users").unwrap());
     }
 
     #[test]
