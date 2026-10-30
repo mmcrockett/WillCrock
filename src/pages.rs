@@ -72,6 +72,13 @@ const ICON_PADDLE: &str = "<g transform=\"rotate(45 12 12)\">\
     <path d=\"M10.5 14.5V21a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-6.5\"/>\
     <circle cx=\"10\" cy=\"6\" r=\"0.6\"/><circle cx=\"14\" cy=\"6\" r=\"0.6\"/>\
     <circle cx=\"12\" cy=\"9\" r=\"0.6\"/></g>";
+const ICON_RECIPES: &str =
+    "<path d=\"M6 13.9A4 4 0 0 1 7 6a5 5 0 0 1 10 0 4 4 0 0 1 1 7.9V20H6z\"/>\
+    <path d=\"M6 17h12\"/>";
+const ICON_PHOTOS: &str = "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/>\
+    <circle cx=\"9\" cy=\"9\" r=\"2\"/><path d=\"m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21\"/>";
+const ICON_TRIPS: &str = "<path d=\"M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0z\"/>\
+    <circle cx=\"12\" cy=\"10\" r=\"3\"/>";
 const ICON_MENU: &str = "<path d=\"M4 6h16M4 12h16M4 18h16\"/>";
 
 fn icon(paths: &str) -> String {
@@ -138,6 +145,19 @@ fn nav_items(user: &User, features: Features) -> Vec<NavItem> {
             label: "Pickleball",
             icon: ICON_PADDLE,
             locked: !user.can(Feature::Pickle),
+        });
+    }
+    for (feature, key, href, icon) in [
+        (Feature::Recipes, "recipes", "/recipes", ICON_RECIPES),
+        (Feature::Photos, "photos", "/photos", ICON_PHOTOS),
+        (Feature::Trips, "trips", "/trips", ICON_TRIPS),
+    ] {
+        items.push(NavItem {
+            key,
+            href,
+            label: feature.label(),
+            icon,
+            locked: !user.can(feature),
         });
     }
     items.sort_by_key(|i| i.label.to_lowercase());
@@ -580,6 +600,19 @@ pub fn pickle_cancel_failed(user: &User, features: Features, message: &str) -> S
     )
 }
 
+pub fn placeholder(user: &User, features: Features, feature: Feature) -> String {
+    app_page(
+        feature.label(),
+        feature.as_str(),
+        user,
+        features,
+        &format!(
+            "{}<div class=\"card shadow-sm\"><div class=\"card-body\">Coming soon.</div></div>",
+            page_title(feature.label())
+        ),
+    )
+}
+
 pub fn not_found() -> String {
     card_page("Not found", "<a href=\"/\">Home</a>")
 }
@@ -944,5 +977,28 @@ mod tests {
         assert!(html.contains("Cancel did not go through."));
         assert!(html.contains("&lt;nope&gt;"));
         assert!(!html.contains("<nope>"));
+    }
+
+    #[test]
+    fn placeholder_links_follow_the_grant() {
+        let member = member_with(vec![Feature::Recipes]);
+        let html = home(&member, Features::default());
+        assert!(html.contains("href=\"/recipes\""));
+        assert!(!html.contains("href=\"/photos\""));
+        assert!(!html.contains("href=\"/trips\""));
+        let admin = home(&user(1, "mike", true), Features::default());
+        for path in ["/recipes", "/photos", "/trips"] {
+            assert!(admin.contains(&format!("href=\"{path}\"")), "{path}");
+        }
+        let none = home(&user(2, "sam", false), Features::default());
+        assert!(!none.contains("href=\"/recipes\""));
+        assert!(none.contains("tile locked"));
+    }
+
+    #[test]
+    fn placeholder_page_marks_its_link_active() {
+        let html = placeholder(&user(1, "mike", true), Features::default(), Feature::Trips);
+        assert!(html.contains("Coming soon."));
+        assert!(html.contains("side-link active\" href=\"/trips\""));
     }
 }

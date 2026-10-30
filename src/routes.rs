@@ -71,6 +71,15 @@ fn authed(
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
         ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
         ("GET", ["pickle"]) if user.can(Feature::Pickle) => pickle_page(conn, cfg, user, now),
+        ("GET", [page @ ("recipes" | "photos" | "trips")])
+            if Feature::parse(page).is_some_and(|f| user.can(f)) =>
+        {
+            let feature = Feature::parse(page).expect("matched above");
+            Ok(Resp::html(
+                200,
+                pages::placeholder(user, features(cfg), feature),
+            ))
+        }
         ("POST", ["pickle", "bookings", id, "cancel"]) if user.can(Feature::Pickle) => {
             pickle_cancel(conn, cfg, user, id)
         }

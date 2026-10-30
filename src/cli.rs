@@ -14,7 +14,7 @@ pub fn fail(msg: impl std::fmt::Display) -> ! {
     exit(1)
 }
 
-const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable|enable|admin|unadmin <email> | user grant|revoke <email> <sms|pickle> | mail-test <address> | pickle sync|reserve-today|reserve|cancel|login]";
+const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable|enable|admin|unadmin <email> | user grant|revoke <email> <sms|pickle|recipes|photos|trips> | mail-test <address> | pickle sync|reserve-today|reserve|cancel|login]";
 
 pub fn migrate() {
     let cfg = config::load().unwrap_or_else(|e| fail(e));
