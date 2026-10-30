@@ -28,6 +28,17 @@ impl Req {
         }
     }
 
+    #[cfg(test)]
+    pub fn test(method: &str, path: &str, form: &str) -> Req {
+        Req {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: HashMap::new(),
+            form: parse_form(form),
+            cookies: String::new(),
+        }
+    }
+
     pub fn cookie(&self, name: &str) -> Option<&str> {
         self.cookies.split(';').find_map(|pair| {
             let (k, v) = pair.trim().split_once('=')?;

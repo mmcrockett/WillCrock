@@ -2,6 +2,7 @@ use crate::auth::{Feature, User};
 use crate::config::Quackr;
 use crate::pickle::dashboard::{self, Dashboard};
 use crate::sms::{self, Sms};
+use crate::trips::{self, Item, Kind, Trip};
 
 #[derive(Clone, Copy, Default)]
 pub struct Features {
@@ -600,6 +601,197 @@ pub fn pickle_cancel_failed(user: &User, features: Features, message: &str) -> S
     )
 }
 
+const TRIP_BTN: &str = "btn btn-outline-secondary btn-lg w-100 text-start mb-2";
+
+fn alert(error: Option<&str>) -> String {
+    error
+        .map(|e| format!("<div class=\"alert alert-danger\">{}</div>", esc(e)))
+        .unwrap_or_default()
+}
+
+fn trip_button(t: &Trip) -> String {
+    format!(
+        "<a class=\"{TRIP_BTN}\" href=\"/trips/{}\">{} \
+         <span class=\"small text-body-secondary\">{}</span></a>",
+        t.id,
+        esc(&t.location),
+        esc(&trips::format_range(t.start, t.end)),
+    )
+}
+
+pub fn trips_index(
+    user: &User,
+    features: Features,
+    upcoming: &[Trip],
+    past: &[Trip],
+    error: Option<&str>,
+) -> String {
+    let list: String = if upcoming.is_empty() {
+        "<p class=\"text-body-secondary\">No trips yet.</p>".to_string()
+    } else {
+        upcoming.iter().map(trip_button).collect()
+    };
+    let past: String = if past.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<details class=\"mb-4\"><summary class=\"btn btn-sm btn-outline-secondary mb-3\">\
+             Past trips</summary>{}</details>",
+            past.iter().map(trip_button).collect::<String>()
+        )
+    };
+    app_page(
+        "Trips",
+        "trips",
+        user,
+        features,
+        &format!(
+            "{}{}{list}{past}\
+             <div class=\"card shadow-sm\"><div class=\"card-body\">\
+             <h2 class=\"h5 mb-3\">New trip</h2>\
+             <form method=\"post\" action=\"/trips\" class=\"row g-2 align-items-center\">\
+             <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"location\" placeholder=\"Location\" required></div>\
+             <div class=\"col-6 col-md-auto\"><input class=\"form-control\" type=\"date\" name=\"start\" required></div>\
+             <div class=\"col-6 col-md-auto\"><input class=\"form-control\" type=\"date\" name=\"end\" required></div>\
+             <div class=\"col-auto\"><button class=\"btn btn-primary\">Add</button></div>\
+             </form></div></div>",
+            page_title("Trips"),
+            alert(error),
+        ),
+    )
+}
+
+fn item_view(i: &Item) -> String {
+    match i.href() {
+        Some(href) => format!(
+            "<a class=\"{TRIP_BTN}\" href=\"{}\" target=\"_blank\" rel=\"noopener\">{}</a>",
+            esc(&href),
+            esc(i.display_label())
+        ),
+        None => {
+            let text = match &i.label {
+                Some(label) => format!(
+                    "{} <span class=\"small text-body-secondary\">{}</span>",
+                    esc(label),
+                    esc(&i.value)
+                ),
+                None => esc(&i.value),
+            };
+            format!("<div class=\"card shadow-sm mb-2\"><div class=\"card-body py-2\">{text}</div></div>")
+        }
+    }
+}
+
+pub fn trip_view(user: &User, features: Features, trip: &Trip, items: &[Item]) -> String {
+    let body: String = items.iter().map(item_view).collect();
+    app_page(
+        &trips::title(trip),
+        "trips",
+        user,
+        features,
+        &format!(
+            "{}{body}<div class=\"d-flex justify-content-between mt-3\">\
+             <a href=\"/trips\">&larr; All trips</a>\
+             <a href=\"/trips/{}/edit\">Edit</a></div>",
+            page_title(&trips::title(trip)),
+            trip.id,
+        ),
+    )
+}
+
+fn kind_options(selected: Kind) -> String {
+    Kind::ALL
+        .into_iter()
+        .map(|k| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                k.as_str(),
+                if k == selected { " selected" } else { "" },
+                k.label()
+            )
+        })
+        .collect()
+}
+
+fn item_fields(kind: Kind, label: &str, value: &str) -> String {
+    format!(
+        "<div class=\"col-4 col-md-2\"><select class=\"form-select\" name=\"kind\">{}</select></div>\
+         <div class=\"col-8 col-md-3\"><input class=\"form-control\" name=\"label\" placeholder=\"Label\" value=\"{}\"></div>\
+         <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"value\" placeholder=\"Link URL, address, or text\" value=\"{}\" required></div>",
+        kind_options(kind),
+        esc(label),
+        esc(value),
+    )
+}
+
+fn item_edit(trip_id: i64, i: &Item, first: bool, last: bool) -> String {
+    let action = format!("/trips/{trip_id}/items/{}", i.id);
+    let step = |dir: &str, glyph: &str, off: bool| {
+        format!(
+            "<button class=\"btn btn-outline-secondary\" formaction=\"{action}/{dir}\" formnovalidate \
+             aria-label=\"Move {dir}\"{}>{glyph}</button>",
+            if off { " disabled" } else { "" }
+        )
+    };
+    format!(
+        "<form method=\"post\" action=\"{action}\" class=\"row g-2 align-items-center mb-3\">{fields}\
+         <div class=\"col-12 col-md-auto text-nowrap\"><div class=\"btn-group\">\
+         <button class=\"btn btn-primary\">Save</button>{up}{down}\
+         <button class=\"btn btn-outline-danger\" formaction=\"{action}/delete\" formnovalidate \
+         onclick=\"return confirm(this.dataset.msg)\" data-msg=\"{msg}\">Delete</button>\
+         </div></div></form>",
+        fields = item_fields(i.kind, i.label.as_deref().unwrap_or(""), &i.value),
+        up = step("up", "&uarr;", first),
+        down = step("down", "&darr;", last),
+        msg = esc(&format!("Delete {}?", i.display_label())),
+    )
+}
+
+pub fn trip_edit(
+    user: &User,
+    features: Features,
+    trip: &Trip,
+    items: &[Item],
+    error: Option<&str>,
+) -> String {
+    let rows: String = items
+        .iter()
+        .enumerate()
+        .map(|(n, i)| item_edit(trip.id, i, n == 0, n + 1 == items.len()))
+        .collect();
+    app_page(
+        &trips::title(trip),
+        "trips",
+        user,
+        features,
+        &format!(
+            "{title}{err}\
+             <div class=\"card shadow-sm mb-4\"><div class=\"card-body\">\
+             <form method=\"post\" action=\"/trips/{id}\" class=\"row g-2 align-items-center\">\
+             <div class=\"col-12 col-md\"><input class=\"form-control\" name=\"location\" value=\"{loc}\" required></div>\
+             <div class=\"col-6 col-md-auto\"><input class=\"form-control\" type=\"date\" name=\"start\" value=\"{start}\" required></div>\
+             <div class=\"col-6 col-md-auto\"><input class=\"form-control\" type=\"date\" name=\"end\" value=\"{end}\" required></div>\
+             <div class=\"col-auto\"><button class=\"btn btn-primary\">Save</button></div></form></div></div>\
+             <div class=\"card shadow-sm mb-4\"><div class=\"card-body\">{rows}\
+             <h2 class=\"h5 mb-3\">Add item</h2>\
+             <form method=\"post\" action=\"/trips/{id}/items\" class=\"row g-2 align-items-center\">{new_fields}\
+             <div class=\"col-auto\"><button class=\"btn btn-primary\">Add</button></div></form></div></div>\
+             <div class=\"d-flex justify-content-between align-items-center\">\
+             <a href=\"/trips/{id}\">&larr; Done</a>\
+             <form method=\"post\" action=\"/trips/{id}/delete\" onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"{msg}\">\
+             <button class=\"btn btn-sm btn-outline-danger\">Delete trip</button></form></div>",
+            title = page_title(&trips::title(trip)),
+            err = alert(error),
+            id = trip.id,
+            loc = esc(&trip.location),
+            start = trip.start,
+            end = trip.end,
+            new_fields = item_fields(Kind::Link, "", ""),
+            msg = esc(&format!("Delete {} and all its items?", trip.location)),
+        ),
+    )
+}
+
 pub fn placeholder(user: &User, features: Features, feature: Feature) -> String {
     app_page(
         feature.label(),
@@ -997,8 +1189,90 @@ mod tests {
 
     #[test]
     fn placeholder_page_marks_its_link_active() {
-        let html = placeholder(&user(1, "mike", true), Features::default(), Feature::Trips);
+        let html = placeholder(
+            &user(1, "mike", true),
+            Features::default(),
+            Feature::Recipes,
+        );
         assert!(html.contains("Coming soon."));
-        assert!(html.contains("side-link active\" href=\"/trips\""));
+        assert!(html.contains("side-link active\" href=\"/recipes\""));
+    }
+
+    fn sample_trip() -> Trip {
+        Trip {
+            id: 7,
+            location: "Galveston <b>".to_string(),
+            start: "2026-06-21".parse().unwrap(),
+            end: "2026-06-26".parse().unwrap(),
+        }
+    }
+
+    fn sample_item(id: i64, kind: Kind, label: Option<&str>, value: &str) -> Item {
+        Item {
+            id,
+            kind,
+            label: label.map(String::from),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn trips_index_lists_buttons_and_collapses_past() {
+        let u = user(1, "mike", true);
+        let empty = trips_index(&u, Features::default(), &[], &[], None);
+        assert!(empty.contains("No trips yet."));
+        assert!(empty.contains("side-link active\" href=\"/trips\""));
+        assert!(!empty.contains("Past trips"));
+        let one = [sample_trip()];
+        let html = trips_index(&u, Features::default(), &one, &one, Some("<oops>"));
+        assert!(html.contains("href=\"/trips/7\""));
+        assert!(html.contains("Jun 21-26, 2026"));
+        assert!(html.contains("Past trips</summary>"));
+        assert!(html.contains("&lt;oops&gt;"));
+        assert!(!html.contains("<b>"));
+    }
+
+    #[test]
+    fn trip_view_renders_each_kind() {
+        let items = [
+            sample_item(1, Kind::Link, Some("Hotel"), "https://h.example/?a=1&b=2"),
+            sample_item(2, Kind::Map, None, "1 Main St, Austin"),
+            sample_item(3, Kind::Note, Some("Code"), "<1234>"),
+        ];
+        let u = user(1, "mike", true);
+        let html = trip_view(&u, Features::default(), &sample_trip(), &items);
+        assert!(html.contains(
+            "href=\"https://h.example/?a=1&amp;b=2\" target=\"_blank\" rel=\"noopener\">Hotel</a>"
+        ));
+        assert!(html.contains("href=\"https://maps.google.com/?q=1%20Main%20St%2C%20Austin\""));
+        assert!(html.contains("&lt;1234&gt;"));
+        assert_eq!(html.matches("target=\"_blank\"").count(), 2);
+        assert!(!html.contains("<b>"));
+        assert!(html.contains("href=\"/trips/7/edit\""));
+    }
+
+    #[test]
+    fn trip_edit_has_per_item_actions_and_confirms_deletes() {
+        let items = [
+            sample_item(1, Kind::Note, None, "a"),
+            sample_item(2, Kind::Map, Some("Dinner"), "b"),
+        ];
+        let u = user(1, "mike", true);
+        let html = trip_edit(&u, Features::default(), &sample_trip(), &items, None);
+        for path in [
+            "/trips/7/items/1/up",
+            "/trips/7/items/2/down",
+            "/trips/7/items/2/delete",
+            "/trips/7/items",
+            "/trips/7/delete",
+        ] {
+            assert!(html.contains(&format!("\"{path}\"")), "{path}");
+        }
+        assert!(html.contains(
+            "formaction=\"/trips/7/items/1/up\" formnovalidate aria-label=\"Move up\" disabled"
+        ));
+        assert!(html.contains("<option value=\"map\" selected>Map</option>"));
+        assert!(html.contains("data-msg=\"Delete Dinner?\""));
+        assert!(html.contains("Delete Galveston &lt;b&gt; and all its items?"));
     }
 }

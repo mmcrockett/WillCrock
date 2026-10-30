@@ -1,7 +1,7 @@
 use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
-use crate::{log, mail, pages, pickle, sms};
+use crate::{log, mail, pages, pickle, sms, trips};
 use rusqlite::Connection;
 
 fn features(cfg: &Config) -> pages::Features {
@@ -71,7 +71,7 @@ fn authed(
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
         ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
         ("GET", ["pickle"]) if user.can(Feature::Pickle) => pickle_page(conn, cfg, user, now),
-        ("GET", [page @ ("recipes" | "photos" | "trips")])
+        ("GET", [page @ ("recipes" | "photos")])
             if Feature::parse(page).is_some_and(|f| user.can(f)) =>
         {
             let feature = Feature::parse(page).expect("matched above");
@@ -79,6 +79,9 @@ fn authed(
                 200,
                 pages::placeholder(user, features(cfg), feature),
             ))
+        }
+        (_, ["trips", rest @ ..]) if user.can(Feature::Trips) => {
+            trips_route(conn, cfg, req, user, rest, now)
         }
         ("POST", ["pickle", "bookings", id, "cancel"]) if user.can(Feature::Pickle) => {
             pickle_cancel(conn, cfg, user, id)
@@ -137,6 +140,120 @@ fn sms_page(cfg: &Config, user: &User) -> Resp {
         200,
         pages::sms(user, features(cfg), quackr, messages.as_deref()),
     )
+}
+
+fn trips_route(
+    conn: &Connection,
+    cfg: &Config,
+    req: &Req,
+    user: &User,
+    segs: &[&str],
+    now: i64,
+) -> rusqlite::Result<Resp> {
+    let feats = features(cfg);
+    let not_found = || Ok(Resp::html(404, pages::not_found()));
+    let form = |key: &str| req.form.get(key).map(String::as_str).unwrap_or("");
+    let trip_input = || trips::parse_trip(form("location"), form("start"), form("end"));
+    let item_input = || trips::parse_item(form("kind"), form("label"), form("value"));
+
+    let (method, id, rest) = match (req.method.as_str(), segs) {
+        ("GET", []) => {
+            let (upcoming, past) = trips::list(conn, trips::today(now))?;
+            return Ok(Resp::html(
+                200,
+                pages::trips_index(user, feats, &upcoming, &past, None),
+            ));
+        }
+        ("POST", []) => {
+            return match trip_input() {
+                Ok(input) => {
+                    let id = trips::create(conn, &input, now)?;
+                    Ok(Resp::redirect(&format!("/trips/{id}/edit")))
+                }
+                Err(e) => {
+                    let (upcoming, past) = trips::list(conn, trips::today(now))?;
+                    Ok(Resp::html(
+                        400,
+                        pages::trips_index(user, feats, &upcoming, &past, Some(&e)),
+                    ))
+                }
+            };
+        }
+        (method, [id, rest @ ..]) => (method, id, rest),
+        _ => return not_found(),
+    };
+    let Ok(id) = id.parse::<i64>() else {
+        return not_found();
+    };
+    let Some(trip) = trips::get(conn, id)? else {
+        return not_found();
+    };
+    let edit_url = format!("/trips/{id}/edit");
+    let edit_page = |status: u16, error: Option<&str>| -> rusqlite::Result<Resp> {
+        let items = trips::items(conn, id)?;
+        Ok(Resp::html(
+            status,
+            pages::trip_edit(user, feats, &trip, &items, error),
+        ))
+    };
+    let done = |result: Result<(), String>| match result {
+        Ok(()) => Ok(Resp::redirect(&edit_url)),
+        Err(e) => edit_page(400, Some(&e)),
+    };
+
+    match (method, rest) {
+        ("GET", []) => {
+            let items = trips::items(conn, id)?;
+            Ok(Resp::html(
+                200,
+                pages::trip_view(user, feats, &trip, &items),
+            ))
+        }
+        ("GET", ["edit"]) => edit_page(200, None),
+        ("POST", []) => match trip_input() {
+            Ok(input) => {
+                trips::update(conn, id, &input)?;
+                Ok(Resp::redirect(&edit_url))
+            }
+            Err(e) => edit_page(400, Some(&e)),
+        },
+        ("POST", ["delete"]) => {
+            trips::delete(conn, id)?;
+            Ok(Resp::redirect("/trips"))
+        }
+        ("POST", ["items"]) => match item_input() {
+            Ok(input) => {
+                trips::add_item(conn, id, &input)?;
+                done(Ok(()))
+            }
+            Err(e) => done(Err(e)),
+        },
+        ("POST", ["items", item]) => {
+            let Ok(item) = item.parse::<i64>() else {
+                return not_found();
+            };
+            match item_input() {
+                Ok(input) if trips::update_item(conn, id, item, &input)? == 0 => not_found(),
+                Ok(_) => done(Ok(())),
+                Err(e) => done(Err(e)),
+            }
+        }
+        ("POST", ["items", item, action @ ("delete" | "up" | "down")]) => {
+            let Ok(item) = item.parse::<i64>() else {
+                return not_found();
+            };
+            let found = match *action {
+                "delete" => trips::delete_item(conn, id, item)? > 0,
+                up_or_down => trips::move_item(conn, id, item, up_or_down == "up")?,
+            };
+            if found {
+                done(Ok(()))
+            } else {
+                not_found()
+            }
+        }
+        _ => not_found(),
+    }
 }
 
 fn pickle_page(conn: &Connection, cfg: &Config, user: &User, now: i64) -> rusqlite::Result<Resp> {
@@ -208,4 +325,107 @@ fn post_code(conn: &Connection, req: &Req, now: i64) -> rusqlite::Result<Resp> {
         }
         None => Resp::html(400, pages::code(email, true)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn cfg() -> Config {
+        toml::from_str(
+            "db_path = \"x\"\n[smtp]\nhost=\"h\"\nusername=\"u\"\npassword=\"p\"\nfrom=\"f\"\n",
+        )
+        .unwrap()
+    }
+
+    fn user(access: Vec<Feature>) -> User {
+        User {
+            id: 1,
+            email: "sam@example.com".into(),
+            name: None,
+            is_admin: false,
+            disabled: false,
+            access,
+        }
+    }
+
+    fn call(conn: &Connection, u: &User, method: &str, path: &str, form: &str) -> (u16, String) {
+        let req = Req::test(method, path, form);
+        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let resp = authed(conn, &cfg(), &req, &segs, u, "tok", 1_780_369_200).unwrap();
+        let mut out = Vec::new();
+        resp.write_to(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let status = text["Status: ".len()..].split("\r\n").next().unwrap();
+        (status.parse().unwrap(), text)
+    }
+
+    #[test]
+    fn trips_flow_end_to_end() {
+        let conn = db::open_memory();
+        let me = user(vec![Feature::Trips]);
+        let (s, html) = call(&conn, &me, "GET", "/trips", "");
+        assert_eq!(s, 200);
+        assert!(html.contains("No trips yet."));
+
+        let new_trip = "location=Galveston&start=2026-06-21&end=2026-06-26";
+        let (s, html) = call(&conn, &me, "POST", "/trips", new_trip);
+        assert_eq!(s, 303);
+        assert!(html.contains("Location: /trips/1/edit"));
+        let blank = "location=&start=2026-06-21&end=2026-06-26";
+        assert_eq!(call(&conn, &me, "POST", "/trips", blank).0, 400);
+
+        for form in [
+            "kind=link&label=Hotel&value=https%3A%2F%2Fh.example",
+            "kind=map&label=&value=1+Main+St",
+            "kind=note&label=Code&value=1234",
+        ] {
+            assert_eq!(call(&conn, &me, "POST", "/trips/1/items", form).0, 303);
+        }
+        let bad = "kind=link&label=&value=javascript%3Aalert(1)";
+        let (s, html) = call(&conn, &me, "POST", "/trips/1/items", bad);
+        assert_eq!(s, 400);
+        assert!(html.contains("Links must start with"));
+
+        let (_, html) = call(&conn, &me, "GET", "/trips/1", "");
+        assert!(html.contains("Galveston - Jun 21-26, 2026"));
+        assert!(html.contains("https://maps.google.com/?q=1%20Main%20St"));
+
+        assert_eq!(call(&conn, &me, "POST", "/trips/1/items/3/up", "").0, 303);
+        assert_eq!(
+            call(&conn, &me, "POST", "/trips/1/items/1/delete", "").0,
+            303
+        );
+        let (_, html) = call(&conn, &me, "GET", "/trips/1/edit", "");
+        assert!(!html.contains("Hotel"));
+        assert!(html.find("value=\"1234\"").unwrap() < html.find("value=\"1 Main St\"").unwrap());
+
+        assert_eq!(
+            call(&conn, &me, "POST", "/trips/1/items/99/delete", "").0,
+            404
+        );
+        assert_eq!(call(&conn, &me, "POST", "/trips/1/delete", "").0, 303);
+        assert_eq!(call(&conn, &me, "GET", "/trips/1", "").0, 404);
+    }
+
+    #[test]
+    fn trips_need_the_grant() {
+        let conn = db::open_memory();
+        let granted = user(vec![Feature::Trips]);
+        let new_trip = "location=A&start=2026-06-21&end=2026-06-22";
+        call(&conn, &granted, "POST", "/trips", new_trip);
+        let other = user(vec![Feature::Sms]);
+        for (method, path) in [
+            ("GET", "/trips"),
+            ("GET", "/trips/1"),
+            ("GET", "/trips/1/edit"),
+            ("POST", "/trips"),
+            ("POST", "/trips/1/delete"),
+        ] {
+            let (s, _) = call(&conn, &other, method, path, new_trip);
+            assert_eq!(s, 404, "{method} {path}");
+        }
+        assert_eq!(call(&conn, &granted, "GET", "/trips/1", "").0, 200);
+    }
 }

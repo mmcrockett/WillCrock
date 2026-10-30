@@ -77,6 +77,24 @@ CREATE TABLE user_access (
 );
 INSERT INTO user_access (user_id, feature) SELECT id, 'sms' FROM users;
 ",
+    "
+CREATE TABLE trips (
+  id INTEGER PRIMARY KEY,
+  location TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE trip_items (
+  id INTEGER PRIMARY KEY,
+  trip_id INTEGER NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('link', 'map', 'note')),
+  label TEXT,
+  value TEXT NOT NULL
+);
+CREATE INDEX trip_items_trip_id ON trip_items(trip_id, position);
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
