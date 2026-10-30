@@ -14,15 +14,27 @@ const SLIDE_AFTER: i64 = 3600;
 pub enum Feature {
     Sms,
     Pickle,
+    Recipes,
+    Photos,
+    Trips,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 2] = [Feature::Sms, Feature::Pickle];
+    pub const ALL: [Feature; 5] = [
+        Feature::Sms,
+        Feature::Pickle,
+        Feature::Recipes,
+        Feature::Photos,
+        Feature::Trips,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Feature::Sms => "sms",
             Feature::Pickle => "pickle",
+            Feature::Recipes => "recipes",
+            Feature::Photos => "photos",
+            Feature::Trips => "trips",
         }
     }
 
@@ -30,6 +42,9 @@ impl Feature {
         match self {
             Feature::Sms => "SMS",
             Feature::Pickle => "Pickle",
+            Feature::Recipes => "Recipes",
+            Feature::Photos => "Photos",
+            Feature::Trips => "Trips",
         }
     }
 
@@ -536,6 +551,7 @@ mod tests {
     #[test]
     fn parse_feature_rejects_unknown() {
         assert_eq!(Feature::parse("pickle"), Some(Feature::Pickle));
+        assert_eq!(Feature::parse("trips"), Some(Feature::Trips));
         assert_eq!(Feature::parse("nope"), None);
     }
 
