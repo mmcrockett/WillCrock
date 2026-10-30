@@ -3,6 +3,7 @@
 ## Routes
 
 - Admin-only pages and actions live under `/admin`. The `/admin/*` guard in `src/routes.rs` is the single gate, so don't put an admin feature at another path and rely on a per-handler `is_admin` check.
+- Feature pages (SMS, Pickle) gate on `user.can(Feature::X)` in `src/routes.rs` and in the nav/tile in `src/pages.rs`; admins pass implicitly. Add a new feature to `Feature` in `src/auth.rs` and it shows up as a toggle on the Users page and in `willcrock user grant|revoke`.
 
 ## Rust tooling
 

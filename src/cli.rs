@@ -14,7 +14,7 @@ pub fn fail(msg: impl std::fmt::Display) -> ! {
     exit(1)
 }
 
-const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable|enable|admin|unadmin <email> | mail-test <address> | pickle sync|reserve-today|reserve|cancel|login]";
+const USAGE: &str = "usage: willcrock [migrate | user add <email> [--admin] [--name <name>] | user list | user disable|enable|admin|unadmin <email> | user grant|revoke <email> <sms|pickle> | mail-test <address> | pickle sync|reserve-today|reserve|cancel|login]";
 
 pub fn migrate() {
     let cfg = config::load().unwrap_or_else(|e| fail(e));
@@ -42,6 +42,8 @@ pub fn user(args: &[String]) {
         Some("enable") => set_disabled(&conn, &args[1..], false),
         Some("admin") => set_admin(&conn, &args[1..], true),
         Some("unadmin") => set_admin(&conn, &args[1..], false),
+        Some("grant") => set_access(&conn, &args[1..], true),
+        Some("revoke") => set_access(&conn, &args[1..], false),
         _ => fail(USAGE),
     };
     result.unwrap_or_else(|e| fail(e));
@@ -68,10 +70,15 @@ fn add(conn: &rusqlite::Connection, args: &[String]) -> rusqlite::Result<()> {
 fn list(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     for u in auth::list_users(conn)? {
         println!(
-            "{}\t{}\t{}{}",
+            "{}\t{}\t{}\t{}{}",
             u.id,
             u.email,
             if u.is_admin { "admin" } else { "member" },
+            u.access
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
             if u.disabled { "\tdisabled" } else { "" }
         );
     }
@@ -98,6 +105,13 @@ fn set_disabled(
 
 fn set_admin(conn: &rusqlite::Connection, args: &[String], is_admin: bool) -> rusqlite::Result<()> {
     auth::set_admin(conn, user_id(conn, args)?, is_admin)
+}
+
+fn set_access(conn: &rusqlite::Connection, args: &[String], on: bool) -> rusqlite::Result<()> {
+    let Some(feature) = args.get(1).and_then(|f| auth::Feature::parse(f)) else {
+        fail(USAGE)
+    };
+    auth::set_access(conn, user_id(conn, args)?, feature, on)
 }
 
 pub fn usage_exit() -> ! {

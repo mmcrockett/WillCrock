@@ -69,6 +69,14 @@ CREATE TABLE pickle_token (
   updated_at TEXT NOT NULL
 );
 ",
+    "
+CREATE TABLE user_access (
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  feature TEXT NOT NULL,
+  PRIMARY KEY (user_id, feature)
+);
+INSERT INTO user_access (user_id, feature) SELECT id, 'sms' FROM users;
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
@@ -79,9 +87,18 @@ pub fn open(path: &str) -> rusqlite::Result<Connection> {
 }
 
 pub fn migrate(conn: &mut Connection) -> rusqlite::Result<usize> {
+    migrate_to(conn, MIGRATIONS.len())
+}
+
+pub fn migrate_to(conn: &mut Connection, version: usize) -> rusqlite::Result<usize> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let mut applied = 0;
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+    for (i, sql) in MIGRATIONS
+        .iter()
+        .enumerate()
+        .take(version)
+        .skip(current as usize)
+    {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", (i + 1) as i64)?;
