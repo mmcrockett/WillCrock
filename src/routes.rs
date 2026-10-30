@@ -326,3 +326,106 @@ fn post_code(conn: &Connection, req: &Req, now: i64) -> rusqlite::Result<Resp> {
         None => Resp::html(400, pages::code(email, true)),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn cfg() -> Config {
+        toml::from_str(
+            "db_path = \"x\"\n[smtp]\nhost=\"h\"\nusername=\"u\"\npassword=\"p\"\nfrom=\"f\"\n",
+        )
+        .unwrap()
+    }
+
+    fn user(access: Vec<Feature>) -> User {
+        User {
+            id: 1,
+            email: "sam@example.com".into(),
+            name: None,
+            is_admin: false,
+            disabled: false,
+            access,
+        }
+    }
+
+    fn call(conn: &Connection, u: &User, method: &str, path: &str, form: &str) -> (u16, String) {
+        let req = Req::test(method, path, form);
+        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let resp = authed(conn, &cfg(), &req, &segs, u, "tok", 1_780_369_200).unwrap();
+        let mut out = Vec::new();
+        resp.write_to(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let status = text["Status: ".len()..].split("\r\n").next().unwrap();
+        (status.parse().unwrap(), text)
+    }
+
+    #[test]
+    fn trips_flow_end_to_end() {
+        let conn = db::open_memory();
+        let me = user(vec![Feature::Trips]);
+        let (s, html) = call(&conn, &me, "GET", "/trips", "");
+        assert_eq!(s, 200);
+        assert!(html.contains("No trips yet."));
+
+        let new_trip = "location=Galveston&start=2026-06-21&end=2026-06-26";
+        let (s, html) = call(&conn, &me, "POST", "/trips", new_trip);
+        assert_eq!(s, 303);
+        assert!(html.contains("Location: /trips/1/edit"));
+        let blank = "location=&start=2026-06-21&end=2026-06-26";
+        assert_eq!(call(&conn, &me, "POST", "/trips", blank).0, 400);
+
+        for form in [
+            "kind=link&label=Hotel&value=https%3A%2F%2Fh.example",
+            "kind=map&label=&value=1+Main+St",
+            "kind=note&label=Code&value=1234",
+        ] {
+            assert_eq!(call(&conn, &me, "POST", "/trips/1/items", form).0, 303);
+        }
+        let bad = "kind=link&label=&value=javascript%3Aalert(1)";
+        let (s, html) = call(&conn, &me, "POST", "/trips/1/items", bad);
+        assert_eq!(s, 400);
+        assert!(html.contains("Links must start with"));
+
+        let (_, html) = call(&conn, &me, "GET", "/trips/1", "");
+        assert!(html.contains("Galveston - Jun 21-26, 2026"));
+        assert!(html.contains("https://maps.google.com/?q=1%20Main%20St"));
+
+        assert_eq!(call(&conn, &me, "POST", "/trips/1/items/3/up", "").0, 303);
+        assert_eq!(
+            call(&conn, &me, "POST", "/trips/1/items/1/delete", "").0,
+            303
+        );
+        let (_, html) = call(&conn, &me, "GET", "/trips/1/edit", "");
+        assert!(!html.contains("Hotel"));
+        assert!(html.find("value=\"1234\"").unwrap() < html.find("value=\"1 Main St\"").unwrap());
+
+        assert_eq!(
+            call(&conn, &me, "POST", "/trips/1/items/99/delete", "").0,
+            404
+        );
+        assert_eq!(call(&conn, &me, "POST", "/trips/1/delete", "").0, 303);
+        assert_eq!(call(&conn, &me, "GET", "/trips/1", "").0, 404);
+    }
+
+    #[test]
+    fn trips_need_the_grant() {
+        let conn = db::open_memory();
+        let granted = user(vec![Feature::Trips]);
+        let new_trip = "location=A&start=2026-06-21&end=2026-06-22";
+        call(&conn, &granted, "POST", "/trips", new_trip);
+        let other = user(vec![Feature::Sms]);
+        for (method, path) in [
+            ("GET", "/trips"),
+            ("GET", "/trips/1"),
+            ("GET", "/trips/1/edit"),
+            ("POST", "/trips"),
+            ("POST", "/trips/1/delete"),
+        ] {
+            let (s, _) = call(&conn, &other, method, path, new_trip);
+            assert_eq!(s, 404, "{method} {path}");
+        }
+        assert_eq!(call(&conn, &granted, "GET", "/trips/1", "").0, 200);
+    }
+}
