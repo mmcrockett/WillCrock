@@ -138,6 +138,18 @@ pub fn pretty_body(body: &str) -> String {
         .unwrap_or_else(|| body.to_string())
 }
 
+pub fn pretty_message(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.find(['{', '[']) {
+            Some(i) if pretty_body(&line[i..]) != line[i..] => {
+                format!("{}\n{}", line[..i].trim_end(), pretty_body(&line[i..]))
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +229,15 @@ mod tests {
         assert_eq!(pretty_body("{\"a\":1}"), "{\n  \"a\": 1\n}");
         assert_eq!(pretty_body("<html>504</html>"), "<html>504</html>");
         assert_eq!(pretty_body("42"), "42");
+    }
+
+    #[test]
+    fn pretty_message_formats_trailing_json_only() {
+        assert_eq!(
+            pretty_message("x (status 500): {\"a\":1}"),
+            "x (status 500):\n{\n  \"a\": 1\n}"
+        );
+        assert_eq!(pretty_message("plain text"), "plain text");
+        assert_eq!(pretty_message("bad {json"), "bad {json");
     }
 }
