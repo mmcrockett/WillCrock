@@ -323,3 +323,8 @@ body {
     padding: 1.25rem 1rem;
   }
 }
+
+.pickle-body {
+  max-height: 14rem;
+  overflow: auto;
+}

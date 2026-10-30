@@ -89,6 +89,11 @@ pub fn replace_bookings(conn: &Connection, rows: &[BookingRow], now: &str) -> ru
     tx.commit()
 }
 
+pub fn delete_booking(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM pickle_bookings WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 pub fn load_token(conn: &Connection) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT token FROM pickle_token WHERE id = 1", [], |r| {
         r.get(0)
