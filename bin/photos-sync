@@ -4,13 +4,12 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: bin/photos-sync --login user@host [--local-dir DIR]" >&2
-  echo "  --local-dir defaults to ~/willcrock.com/photos" >&2
+  echo "usage: bin/photos-sync --login user@host --local-dir DIR" >&2
   exit 1
 }
 
 login=""
-local_dir="$HOME/willcrock.com/photos"
+local_dir=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --login) login="${2:?--login needs user@host}"; shift 2 ;;
@@ -18,7 +17,7 @@ while [ $# -gt 0 ]; do
     *) usage ;;
   esac
 done
-[ -n "$login" ] || usage
+[ -n "$login" ] && [ -n "$local_dir" ] || usage
 
 remote_dir="data/willcrock.com/photos"
 fcgi="willcrock.com/willcrock.fcgi" # relative to the remote home dir
