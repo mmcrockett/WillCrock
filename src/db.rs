@@ -110,6 +110,7 @@ CREATE TABLE photos (
 CREATE INDEX photos_album ON photos(album);
 CREATE INDEX photos_sha256 ON photos(sha256);
 ",
+    "ALTER TABLE photos ADD COLUMN synced_at INTEGER;",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {

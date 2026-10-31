@@ -27,26 +27,89 @@ pub struct Summary {
     pub albums: Vec<Album>,
     pub total: i64,
     pub missing: i64,
+    pub unsynced: i64,
 }
 
 pub fn run(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("scan") => scan_cmd(),
-        _ => cli::fail("usage: willcrock photos scan"),
+        Some("unsynced") => unsynced_cmd(),
+        Some("mark-synced") => mark_synced_cmd(),
+        _ => cli::fail("usage: willcrock photos scan|unsynced|mark-synced"),
     }
 }
 
-fn scan_cmd() {
+fn open_db() -> (config::Config, Connection) {
     let cfg = config::load().unwrap_or_else(|e| cli::fail(e));
+    let conn = db::open(&cfg.db_path).unwrap_or_else(|e| cli::fail(e));
+    (cfg, conn)
+}
+
+fn scan_cmd() {
+    let (cfg, mut conn) = open_db();
     let Some(photos) = cfg.photos.as_ref() else {
         cli::fail("no [photos] section in config");
     };
-    let mut conn = db::open(&cfg.db_path).unwrap_or_else(|e| cli::fail(e));
     let r = scan(&mut conn, Path::new(&photos.dir), cli::now()).unwrap_or_else(|e| cli::fail(e));
     println!(
         "added {} changed {} unchanged {} missing {}",
         r.added, r.changed, r.unchanged, r.missing
     );
+}
+
+fn unsynced_cmd() {
+    let (_, conn) = open_db();
+    for path in unsynced(&conn).unwrap_or_else(|e| cli::fail(e)) {
+        println!("{path}");
+    }
+}
+
+fn mark_synced_cmd() {
+    let (_, mut conn) = open_db();
+    let n = mark_synced(&mut conn, std::io::stdin().lock(), cli::now())
+        .unwrap_or_else(|e| cli::fail(e));
+    println!("marked {n}");
+}
+
+pub fn unsynced(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM photos WHERE missing_at IS NULL AND synced_at IS NULL ORDER BY path",
+    )?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// Reads `path<TAB>size<TAB>mtime` lines describing the local copy and marks matching rows synced.
+pub fn mark_synced(
+    conn: &mut Connection,
+    input: impl std::io::BufRead,
+    now: i64,
+) -> Result<usize, String> {
+    let db_err = |e: rusqlite::Error| e.to_string();
+    let tx = conn.transaction().map_err(db_err)?;
+    let mut marked = 0;
+    for line in input.lines() {
+        let line = line.map_err(|e| format!("read manifest: {e}"))?;
+        if line.is_empty() {
+            continue;
+        }
+        let mut f = line.split('\t');
+        let (Some(path), Some(size), Some(mtime), None) = (f.next(), f.next(), f.next(), f.next())
+        else {
+            return Err(format!("bad manifest line: {line}"));
+        };
+        let size: i64 = size.parse().map_err(|_| format!("bad size: {line}"))?;
+        let mtime: i64 = mtime.parse().map_err(|_| format!("bad mtime: {line}"))?;
+        marked += tx
+            .execute(
+                "UPDATE photos SET synced_at = ?1 \
+                 WHERE path = ?2 AND size = ?3 AND mtime = ?4 AND missing_at IS NULL",
+                params![now, path, size, mtime],
+            )
+            .map_err(db_err)?;
+    }
+    tx.commit().map_err(db_err)?;
+    Ok(marked)
 }
 
 pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
@@ -68,10 +131,16 @@ pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
         [],
         |r| r.get(0),
     )?;
+    let unsynced = conn.query_row(
+        "SELECT COUNT(*) FROM photos WHERE missing_at IS NULL AND synced_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
     Ok(Summary {
         total: albums.iter().map(|a| a.count).sum(),
         albums,
         missing,
+        unsynced,
     })
 }
 
@@ -102,8 +171,8 @@ pub fn scan(conn: &mut Connection, root: &Path, now: i64) -> Result<ScanReport, 
             }
             Some((id, ..)) => {
                 tx.execute(
-                    "UPDATE photos SET size = ?1, mtime = ?2, sha256 = ?3, missing_at = NULL \
-                     WHERE id = ?4",
+                    "UPDATE photos SET size = ?1, mtime = ?2, sha256 = ?3, missing_at = NULL, \
+                     synced_at = NULL WHERE id = ?4",
                     params![f.size, f.mtime, hash(&f.abs)?, id],
                 )
                 .map_err(db_err)?;
@@ -333,6 +402,54 @@ mod tests {
         let back = scan(&mut conn, &root, 400).unwrap();
         assert_eq!(back.changed + back.unchanged, 3);
         assert_eq!(summary(&conn).unwrap().missing, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn mtime_of(root: &Path, rel: &str) -> i64 {
+        fs::metadata(root.join(rel))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn mark_synced_marks_only_matching_rows() {
+        let root = library("mark");
+        let mut conn = db::open_memory();
+        scan(&mut conn, &root, 100).unwrap();
+        assert_eq!(unsynced(&conn).unwrap().len(), 3);
+        assert_eq!(summary(&conn).unwrap().unsynced, 3);
+        let m = mtime_of(&root, "mike.jpg");
+        let manifest =
+            format!("mike.jpg\t1\t{m}\n2018/20180315_RedRiverTrip/IMG_1.JPG\t99\t{m}\n\n");
+        let n = mark_synced(&mut conn, manifest.as_bytes(), 500).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            unsynced(&conn).unwrap(),
+            vec![
+                "2018/20180315_RedRiverTrip/IMG_1.JPG",
+                "2018/20180900/IMG_2.resize.jpg"
+            ]
+        );
+        assert_eq!(summary(&conn).unwrap().unsynced, 2);
+        assert!(mark_synced(&mut conn, "garbage\n".as_bytes(), 500).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rewritten_file_is_unsynced_again() {
+        let root = library("resync");
+        let mut conn = db::open_memory();
+        scan(&mut conn, &root, 100).unwrap();
+        let m = mtime_of(&root, "mike.jpg");
+        mark_synced(&mut conn, format!("mike.jpg\t1\t{m}\n").as_bytes(), 150).unwrap();
+        assert!(!unsynced(&conn).unwrap().contains(&"mike.jpg".to_string()));
+        write(&root, "mike.jpg", "different length");
+        scan(&mut conn, &root, 200).unwrap();
+        assert!(unsynced(&conn).unwrap().contains(&"mike.jpg".to_string()));
         fs::remove_dir_all(root).unwrap();
     }
 
