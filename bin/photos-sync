@@ -1,32 +1,37 @@
 #!/usr/bin/env bash
 # Two-way sync of the photo library with the server, then tell the server what the Mac has.
 # Never deletes on either side: remove a photo locally AND on the server, or it comes back.
-# usage: WILLCROCK_REMOTE=user@host bin/photos-sync [--dry-run]
 set -euo pipefail
 
-remote="${WILLCROCK_REMOTE:?set WILLCROCK_REMOTE=user@host}"
-local_dir="${PHOTOS_LOCAL:-$HOME/willcrock.com/photos}"
-remote_dir="${PHOTOS_REMOTE:-data/willcrock.com/photos}"
-fcgi='willcrock.com/willcrock.fcgi' # relative to the remote home dir
+usage() {
+  echo "usage: bin/photos-sync --login user@host [--local-dir DIR]" >&2
+  echo "  --local-dir defaults to ~/willcrock.com/photos" >&2
+  exit 1
+}
 
-dry=()
-[ "${1:-}" = "--dry-run" ] && dry=(-n)
+login=""
+local_dir="$HOME/willcrock.com/photos"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --login) login="${2:?--login needs user@host}"; shift 2 ;;
+    --local-dir) local_dir="${2:?--local-dir needs a path}"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+[ -n "$login" ] || usage
+
+remote_dir="data/willcrock.com/photos"
+fcgi="willcrock.com/willcrock.fcgi" # relative to the remote home dir
 
 mkdir -p "$local_dir"
-rsync_opts=(-a --itemize-changes --exclude '.*' "${dry[@]}")
+rsync_opts=(-a --itemize-changes --exclude '.*')
 
 echo "== pull"
-rsync "${rsync_opts[@]}" "$remote:$remote_dir/" "$local_dir/"
+rsync "${rsync_opts[@]}" "$login:$remote_dir/" "$local_dir/"
 echo "== push"
-rsync "${rsync_opts[@]}" "$local_dir/" "$remote:$remote_dir/"
-
-if [ "${#dry[@]}" -gt 0 ]; then
-  echo "dry run: skipped scan and mark-synced"
-  exit 0
-fi
-
+rsync "${rsync_opts[@]}" "$local_dir/" "$login:$remote_dir/"
 echo "== scan"
-ssh "$remote" "$fcgi photos scan"
+ssh "$login" "$fcgi photos scan"
 echo "== mark-synced"
 (cd "$local_dir" && find . -type f ! -name '.*' -exec stat -f '%N%t%z%t%m' {} + | sed 's|^\./||') |
-  ssh "$remote" "$fcgi photos mark-synced"
+  ssh "$login" "$fcgi photos mark-synced"
