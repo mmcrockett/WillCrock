@@ -298,8 +298,7 @@ fn pickle_slot_add(
 ) -> rusqlite::Result<Resp> {
     let field = |key: &str| req.form.get(key).map(String::as_str).unwrap_or("");
     let form = pickle::slots::Form {
-        kind: field("kind"),
-        day: field("day"),
+        repeat: req.form.contains_key("repeat"),
         date: field("date"),
         start: field("start"),
         minutes: field("minutes"),

@@ -34,8 +34,7 @@ pub struct SlotInput {
 }
 
 pub struct Form<'a> {
-    pub kind: &'a str,
-    pub day: &'a str,
+    pub repeat: bool,
     pub date: &'a str,
     pub start: &'a str,
     pub minutes: &'a str,
@@ -54,27 +53,24 @@ pub fn parse(f: &Form, now: i64) -> Result<SlotInput, String> {
     let court = f.court.trim();
     ops::court_attempts(court)?;
 
-    let (day, date) = match f.kind {
-        "weekly" => {
-            let day = f.day.trim().to_lowercase();
-            if !DAYS.contains(&day.as_str()) {
-                return Err("Day is invalid.".into());
-            }
-            (Some(day), None)
+    let date: Date = f
+        .date
+        .trim()
+        .parse()
+        .map_err(|_| "Start date is invalid.")?;
+    let (day, date) = if f.repeat {
+        let day = DAYS[date.weekday().to_monday_zero_offset() as usize];
+        (Some(day.to_string()), None)
+    } else {
+        let earliest = trips::today(now)
+            .checked_add(Span::new().days(8))
+            .map_err(|e| e.to_string())?;
+        if date < earliest {
+            return Err(format!(
+                "Bookings open 7 days ahead at 6am, so the date must be {earliest} or later."
+            ));
         }
-        "once" => {
-            let date: Date = f.date.trim().parse().map_err(|_| "Date is invalid.")?;
-            let earliest = trips::today(now)
-                .checked_add(Span::new().days(8))
-                .map_err(|e| e.to_string())?;
-            if date < earliest {
-                return Err(format!(
-                    "Bookings open 7 days ahead at 6am, so the date must be {earliest} or later."
-                ));
-            }
-            (None, Some(date))
-        }
-        _ => return Err("Choose weekly or one time.".into()),
+        (None, Some(date))
     };
     Ok(SlotInput {
         day,
@@ -151,10 +147,9 @@ mod tests {
     // Mon 2026-10-12 06:00 Central
     const NOW: i64 = 1_791_802_800;
 
-    fn form<'a>(kind: &'a str, day: &'a str, date: &'a str) -> Form<'a> {
+    fn form(repeat: bool, date: &str) -> Form<'_> {
         Form {
-            kind,
-            day,
+            repeat,
             date,
             start: "7:30",
             minutes: "90",
@@ -164,21 +159,21 @@ mod tests {
 
     #[test]
     fn parses_weekly_and_once() {
-        let w = parse(&form("weekly", "Saturday", ""), NOW).unwrap();
+        let w = parse(&form(true, "2026-10-17"), NOW).unwrap();
         assert_eq!(w.day.as_deref(), Some("saturday"));
         assert_eq!(
             (w.start.as_str(), w.minutes, w.court.as_str()),
             ("07:30", 90, "5C")
         );
-        let o = parse(&form("once", "", "2026-10-20"), NOW).unwrap();
+        let o = parse(&form(false, "2026-10-20"), NOW).unwrap();
         assert_eq!(o.date.map(|d| d.to_string()).as_deref(), Some("2026-10-20"));
         assert!(o.day.is_none());
     }
 
     #[test]
     fn once_must_be_after_the_day_the_6am_run_can_still_reach() {
-        assert!(parse(&form("once", "", "2026-10-19"), NOW).is_err());
-        assert!(parse(&form("once", "", "2026-10-20"), NOW).is_ok());
+        assert!(parse(&form(false, "2026-10-19"), NOW).is_err());
+        assert!(parse(&form(false, "2026-10-20"), NOW).is_ok());
     }
 
     #[test]
@@ -186,23 +181,22 @@ mod tests {
         let bad = |f: Form| assert!(parse(&f, NOW).is_err());
         bad(Form {
             start: "730",
-            ..form("weekly", "monday", "")
+            ..form(true, "2026-10-12")
         });
         bad(Form {
             minutes: "45",
-            ..form("weekly", "monday", "")
+            ..form(true, "2026-10-12")
         });
         bad(Form {
             minutes: "x",
-            ..form("weekly", "monday", "")
+            ..form(true, "2026-10-12")
         });
         bad(Form {
             court: "9z",
-            ..form("weekly", "monday", "")
+            ..form(true, "2026-10-12")
         });
-        bad(form("weekly", "funday", ""));
-        bad(form("once", "", "nope"));
-        bad(form("sometimes", "monday", ""));
+        bad(form(true, "nope"));
+        bad(form(false, ""));
     }
 
     fn input(day: Option<&str>, date: Option<&str>, start: &str) -> SlotInput {

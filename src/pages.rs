@@ -579,17 +579,17 @@ pub fn pickle(
         user,
         features,
         &format!(
-            "{}{}{}<div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
+            "{}{}<div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
              <table class=\"table table-hover align-middle mb-0\">\
              <thead><tr><th>Date</th><th>Time</th><th>Court</th><th>Checked in?</th><th></th></tr></thead>\
              <tbody>{rows}</tbody></table></div></div>\
-             <p class=\"text-body-secondary small\">{}</p>\
+             <p class=\"text-body-secondary small\">{}</p>{}\
              <details class=\"pt-3\"><summary class=\"btn btn-sm btn-outline-secondary\">History</summary>\
              <h2 class=\"h6 pt-3\">Last {} days</h2>{history}</details>",
             page_title("Pickleball"),
             alert(error),
-            slots_card(&data.slots),
             esc(&refreshed),
+            slots_card(&data.slots, error.is_some()),
             dashboard::HISTORY_DAYS,
         ),
     )
@@ -655,7 +655,7 @@ fn options(values: &[(String, String)], selected: &str) -> String {
         .collect()
 }
 
-fn slots_card(rows: &[slots::Slot]) -> String {
+fn slots_card(rows: &[slots::Slot], open: bool) -> String {
     let body = if rows.is_empty() {
         "<tr><td colspan=\"4\" class=\"text-body-secondary\">Nothing scheduled.</td></tr>"
             .to_string()
@@ -668,7 +668,6 @@ fn slots_card(rows: &[slots::Slot]) -> String {
             .map(|v| (v.to_string(), capitalize(v)))
             .collect()
     };
-    let days = options(&capitalized(&slots::DAYS), "saturday");
     let lengths = options(
         &slots::MINUTES
             .iter()
@@ -678,27 +677,26 @@ fn slots_card(rows: &[slots::Slot]) -> String {
     );
     let courts = options(&capitalized(&slots::COURT_CHOICES), "any");
     format!(
-        "<h2 class=\"h5 mt-2\">Reservations</h2>\
-         <div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
+        "<details class=\"pt-3\"{open}><summary class=\"btn btn-sm btn-outline-secondary\">Reservations</summary>\
+         <div class=\"card shadow-sm mt-3 mb-2\"><div class=\"table-responsive\">\
          <table class=\"table align-middle mb-0\">\
          <thead><tr><th>When</th><th>Time</th><th>Court</th><th></th></tr></thead>\
          <tbody>{body}</tbody></table></div></div>\
          <form method=\"post\" action=\"/pickle/slots\" class=\"row g-2 align-items-end mb-4\">\
-         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Repeats</label>\
-         <select name=\"kind\" class=\"form-select\"><option value=\"weekly\">Every week</option>\
-         <option value=\"once\">One time</option></select></div>\
-         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Day (weekly)</label>\
-         <select name=\"day\" class=\"form-select\">{days}</select></div>\
-         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Date (one time)</label>\
-         <input type=\"date\" name=\"date\" class=\"form-control\"></div>\
+         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Start date</label>\
+         <input type=\"date\" name=\"date\" required class=\"form-control\"></div>\
          <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Start</label>\
          <input type=\"time\" name=\"start\" value=\"07:30\" required class=\"form-control\"></div>\
          <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Length</label>\
          <select name=\"minutes\" class=\"form-select\">{lengths}</select></div>\
          <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Court</label>\
          <select name=\"court\" class=\"form-select\">{courts}</select></div>\
+         <div class=\"col-6 col-md-auto\"><div class=\"form-check form-switch mb-2\">\
+         <input class=\"form-check-input\" type=\"checkbox\" role=\"switch\" name=\"repeat\" id=\"slot-repeat\" checked>\
+         <label class=\"form-check-label\" for=\"slot-repeat\">Repeat weekly</label></div></div>\
          <div class=\"col-12 col-md-auto\"><button class=\"btn btn-primary w-100\">Add</button></div>\
-         </form>"
+         </form></details>",
+        open = if open { " open" } else { "" },
     )
 }
 
@@ -1288,7 +1286,17 @@ mod tests {
         assert!(html.contains("/pickle/slots/3/delete"));
         assert!(html.contains("&lt;5C&gt;") && !html.contains("<5C>"));
         assert!(html.contains("action=\"/pickle/slots\""));
+        assert!(
+            html.contains("name=\"date\"")
+                && html.contains("name=\"repeat\" id=\"slot-repeat\" checked")
+        );
         assert!(html.contains("&lt;bad&gt;"));
+        assert!(html.contains("<details class=\"pt-3\" open><summary class=\"btn btn-sm btn-outline-secondary\">Reservations</summary>"));
+
+        let calm = pickle(&user(1, "mike", true), pickle_on(), &data, 0, None);
+        assert!(calm.contains(">Reservations</summary>"));
+        assert!(!calm.contains("pt-3\" open>"));
+        assert!(calm.find("<table").unwrap() < calm.find(">Reservations</summary>").unwrap());
     }
 
     #[test]
