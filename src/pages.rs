@@ -540,11 +540,21 @@ fn booking_row(b: &dashboard::Booking, now: i64) -> String {
     } else {
         String::new()
     };
+    let court = b
+        .court
+        .as_deref()
+        .and_then(|c| c.split_whitespace().last())
+        .map(|c| {
+            format!(
+                "<span class=\"badge rounded-pill text-bg-secondary fs-6\">{}</span>",
+                esc(c)
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"text-end\">{}</td></tr>",
+        "<tr><td>{}</td><td>{court}</td><td>{}</td><td>{}</td><td class=\"text-end\">{}</td></tr>",
         esc(&date),
         esc(&time),
-        esc(b.court.as_deref().unwrap_or("")),
         if b.checked_in { "&#9989;" } else { "&#10134;" },
         cancel
     )
@@ -581,7 +591,7 @@ pub fn pickle(
         &format!(
             "{}{}<div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
              <table class=\"table table-hover align-middle mb-0\">\
-             <thead><tr><th>Date</th><th>Time</th><th>Court</th><th>Checked in?</th><th></th></tr></thead>\
+             <thead><tr><th>Date</th><th>Court</th><th>Time</th><th>Checked in?</th><th></th></tr></thead>\
              <tbody>{rows}</tbody></table></div></div>\
              <p class=\"text-body-secondary small\">{}</p>{}\
              <details class=\"pt-3\"><summary class=\"btn btn-sm btn-outline-secondary\">History</summary>\
@@ -1318,6 +1328,23 @@ mod tests {
         assert!(html.contains("data-msg=\"Are you sure you want to cancel"));
         assert!(html.contains("return confirm(this.dataset.msg)"));
         assert!(html.contains("Nothing recorded."));
+    }
+
+    #[test]
+    fn pickle_bookings_show_date_court_pill_then_time() {
+        let data = Dashboard {
+            slots: vec![],
+            bookings: vec![
+                booking("1", "2099-01-01T15:00:00.000Z", "Pickleball 5C"),
+                booking("2", "2099-01-02T15:00:00.000Z", "Court 5"),
+            ],
+            runs: vec![],
+        };
+        let html = pickle(&user(2, "sam", false), pickle_on(), &data, 0, None);
+        assert!(html.contains("<th>Date</th><th>Court</th><th>Time</th><th>Checked in?</th>"));
+        assert!(html.contains("rounded-pill text-bg-secondary fs-6\">5C</span>"));
+        assert!(html.contains("rounded-pill text-bg-secondary fs-6\">5</span>"));
+        assert!(!html.contains("Pickleball 5C") && !html.contains("Court 5"));
     }
 
     #[test]
