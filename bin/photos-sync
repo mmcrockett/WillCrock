@@ -25,12 +25,23 @@ fcgi="willcrock.com/willcrock.fcgi" # relative to the remote home dir
 mkdir -p "$local_dir"
 rsync_opts=(-a --itemize-changes --exclude '.*')
 
+# One authenticated master connection, so the password is asked once per run.
+ctl_dir="$(mktemp -d)"
+ssh_opts=(-o "ControlPath=$ctl_dir/ctl")
+trap 'ssh "${ssh_opts[@]}" -O exit "$login" 2>/dev/null || true; rm -rf "$ctl_dir"' EXIT
+ssh "${ssh_opts[@]}" -o ControlMaster=yes -fN "$login"
+
 echo "== pull"
-rsync "${rsync_opts[@]}" "$login:$remote_dir/" "$local_dir/"
+rsync -e "ssh ${ssh_opts[*]}" "${rsync_opts[@]}" "$login:$remote_dir/" "$local_dir/"
 echo "== push"
-rsync "${rsync_opts[@]}" "$local_dir/" "$login:$remote_dir/"
+rsync -e "ssh ${ssh_opts[*]}" "${rsync_opts[@]}" "$local_dir/" "$login:$remote_dir/"
 echo "== scan"
-ssh "$login" "$fcgi photos scan"
+ssh "${ssh_opts[@]}" "$login" "$fcgi photos scan"
 echo "== mark-synced"
-(cd "$local_dir" && find . -type f ! -name '.*' -exec stat -f '%N%t%z%t%m' {} + | sed 's|^\./||') |
-  ssh "$login" "$fcgi photos mark-synced"
+if stat --version >/dev/null 2>&1; then
+  stat_fmt=(--printf '%n\t%s\t%Y\n') # GNU coreutils
+else
+  stat_fmt=(-f '%N%t%z%t%m') # BSD
+fi
+(cd "$local_dir" && find . -type f ! -name '.*' -exec stat "${stat_fmt[@]}" {} + | sed 's|^\./||') |
+  ssh "${ssh_opts[@]}" "$login" "$fcgi photos mark-synced"
