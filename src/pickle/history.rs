@@ -89,6 +89,12 @@ pub fn replace_bookings(conn: &Connection, rows: &[BookingRow], now: &str) -> ru
     tx.commit()
 }
 
+pub fn checked_in_ids(conn: &Connection) -> rusqlite::Result<std::collections::HashSet<String>> {
+    conn.prepare("SELECT id FROM pickle_bookings WHERE checked_in = 1")?
+        .query_map([], |r| r.get(0))?
+        .collect()
+}
+
 pub fn delete_booking(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM pickle_bookings WHERE id = ?1", [id])?;
     Ok(())
