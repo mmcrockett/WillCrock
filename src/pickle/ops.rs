@@ -47,16 +47,6 @@ fn opt_string(v: Option<&Value>) -> Option<String> {
     }
 }
 
-fn non_empty(v: Option<&Value>) -> bool {
-    match v {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(a)) => !a.is_empty(),
-        Some(Value::Object(o)) => !o.is_empty(),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(_) => true,
-    }
-}
-
 pub fn court_attempts(court: &str) -> Res<(String, Vec<Vec<i64>>)> {
     let label = format!("court {court}");
     match court.to_uppercase().as_str() {
@@ -142,12 +132,14 @@ impl Client<'_> {
         if let Some(cached) = &self.bookings_cache {
             return Ok(cached.clone());
         }
+        let checked_in = history::checked_in_ids(self.conn).map_err(db_err)?;
         let mut out = Vec::new();
         for appt in self.fetch_booking_list("bookings")? {
+            let id = opt_string(appt.get("appointment_id")).ok_or("booking without an id")?;
             out.push(BookingInfo {
-                id: opt_string(appt.get("appointment_id")).ok_or("booking without an id")?,
+                has_checkin: checked_in.contains(&id),
+                id,
                 court: opt_string(appt.get("court_name")),
-                has_checkin: non_empty(appt.get("checkins")),
                 start_time: opt_string(appt.get("start_time")).unwrap_or_default(),
                 end_time: opt_string(appt.get("end_time")).unwrap_or_default(),
             });
@@ -179,18 +171,17 @@ impl Client<'_> {
             json!({ "location_id": LOCATION_ID }),
         ))?;
         if location.ok() {
-            let date = time::rfc3339_offset(&time::central(now)?);
-            self.request(&Req::post(
-                &format!("{API}/members_checkin/addcheckin/{}", next.id),
-                "checkin_member",
-                json!({ "date": date, "users": [self.cfg.member_id] }),
-            ))?;
+            if let Some(cached) = self.bookings_cache.as_mut() {
+                cached
+                    .iter_mut()
+                    .filter(|b| b.id == next.id)
+                    .for_each(|b| b.has_checkin = true);
+            }
             self.note(format!(
                 "checked in {}",
                 time::slot_label(time::parse(&next.start_time)?, None)
             ));
         }
-        self.bookings_cache = None;
         Ok(())
     }
 
@@ -665,22 +656,14 @@ mod tests {
     }
 
     #[test]
-    fn sync_checks_in_and_refreshes_the_bookings_table() {
+    fn sync_checks_in_once_and_remembers_it_locally() {
         let conn = open_memory();
         let (fake, cfg) = (Fake::default(), cfg());
         with_token(&conn);
-        fake.push(
-            200,
-            r#"{"payload":[{"appointment_id":"5","court_name":"6B",
-                "start_time":"2026-10-18T13:30:00.000Z","end_time":"2026-10-18T15:00:00.000Z","checkins":[]}]}"#,
-        );
+        let booked = r#"{"payload":[{"appointment_id":"5","court_name":"6B",
+            "start_time":"2026-10-18T13:30:00.000Z","end_time":"2026-10-18T15:00:00.000Z","checkins":[]}]}"#;
+        fake.push(200, booked);
         fake.push(200, r#"{"ok":true}"#);
-        fake.push(200, r#"{"ok":true}"#);
-        fake.push(
-            200,
-            r#"{"payload":[{"appointment_id":"5","court_name":"6B",
-                "start_time":"2026-10-18T13:30:00.000Z","end_time":"2026-10-18T15:00:00.000Z","checkins":[{"id":1}]}]}"#,
-        );
         let (mut c, _) = client(&fake, &conn, &cfg, "2026-10-18T13:00:00Z");
         c.sync().unwrap();
 
@@ -689,8 +672,6 @@ mod tests {
             [
                 "/api/v1/appointment/booked?sport_id=1&location_id=134",
                 "/api/v1/checkin",
-                "/api/v1/members_checkin/addcheckin/5",
-                "/api/v1/appointment/booked?sport_id=1&location_id=134",
             ]
         );
         assert_eq!(c.notes, ["checked in Sun Oct 18 8:30am"]);
@@ -702,6 +683,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!((id.as_str(), court.as_str(), checked_in), ("5", "6B", true));
+
+        let again = Fake::default();
+        again.push(200, booked);
+        let (mut c, _) = client(&again, &conn, &cfg, "2026-10-18T13:05:00Z");
+        c.sync().unwrap();
+        assert_eq!(
+            again.paths(),
+            ["/api/v1/appointment/booked?sport_id=1&location_id=134"]
+        );
+        assert!(c.notes.is_empty());
     }
 
     #[test]
