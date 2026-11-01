@@ -125,6 +125,26 @@ CREATE TABLE pickle_slots (
 CREATE UNIQUE INDEX pickle_slots_weekly ON pickle_slots(day, start) WHERE day IS NOT NULL;
 CREATE UNIQUE INDEX pickle_slots_once ON pickle_slots(date, start) WHERE date IS NOT NULL;
 ",
+    "
+CREATE TABLE tags (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE photo_tags (
+  photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+  tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (photo_id, tag_id)
+);
+CREATE INDEX photo_tags_tag ON photo_tags(tag_id);
+INSERT OR IGNORE INTO tags (name)
+  SELECT DISTINCT substr(taken_on, 1, 4) FROM photos WHERE taken_on IS NOT NULL;
+INSERT OR IGNORE INTO tags (name)
+  SELECT DISTINCT substr(taken_on, 1, 7) FROM photos WHERE taken_on IS NOT NULL;
+INSERT OR IGNORE INTO photo_tags (photo_id, tag_id)
+  SELECT p.id, t.id FROM photos p
+  JOIN tags t ON t.name IN (substr(p.taken_on, 1, 4), substr(p.taken_on, 1, 7))
+  WHERE p.taken_on IS NOT NULL;
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {

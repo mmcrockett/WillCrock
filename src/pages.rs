@@ -932,43 +932,49 @@ pub fn placeholder(user: &User, features: Features, feature: Feature) -> String 
     )
 }
 
+fn tag_links(tags: &[photos::TagCount], prefix: &str) -> String {
+    tags.iter()
+        .map(|t| {
+            format!(
+                "<a class=\"btn btn-sm btn-outline-secondary me-1 mb-1\" href=\"/photos/t/{prefix}{}\">\
+                 {} <span class=\"badge text-bg-light\">{}</span></a>",
+                crate::http::urlencode(&t.name),
+                esc(&t.name),
+                t.count
+            )
+        })
+        .collect()
+}
+
 pub fn photos(user: &User, features: Features, summary: Option<&photos::Summary>) -> String {
     let body = match summary {
         None => "<div class=\"card shadow-sm\"><div class=\"card-body\">\
                  Photos are not configured.</div></div>"
             .to_string(),
         Some(s) => {
-            let rows: String = s
-                .albums
-                .iter()
-                .map(|a| {
-                    format!(
-                        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-                        if a.name.is_empty() {
-                            "(top level)".to_string()
-                        } else {
-                            esc(&a.name)
-                        },
-                        esc(a.taken_on.as_deref().unwrap_or("")),
-                        a.count
-                    )
-                })
-                .collect();
-            let mut missing = String::new();
+            let mut note = String::new();
+            if s.untagged > 0 {
+                note.push_str(&format!(", {} untagged", s.untagged));
+            }
             if s.missing > 0 {
-                missing.push_str(&format!(", {} missing from disk", s.missing));
+                note.push_str(&format!(", {} missing from disk", s.missing));
             }
             if s.unsynced > 0 {
-                missing.push_str(&format!(", {} not yet synced to local", s.unsynced));
+                note.push_str(&format!(", {} not yet synced to local", s.unsynced));
             }
+            let others = if s.other_tags.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<h2 class=\"h6 mt-4\">Tags</h2><div>{}</div>",
+                    tag_links(&s.other_tags, "")
+                )
+            };
             format!(
-                "<p class=\"text-body-secondary small\">{} photos in {} albums{missing}.</p>\
-                 <div class=\"card shadow-sm\"><div class=\"table-responsive\">\
-                 <table class=\"table table-hover align-middle mb-0\">\
-                 <thead><tr><th>Album</th><th>Date</th><th>Photos</th></tr></thead>\
-                 <tbody>{rows}</tbody></table></div></div>",
+                "<p class=\"text-body-secondary small\">{} photos{note}.</p>\
+                 <h2 class=\"h6\">Years</h2><div>{}</div>{others}",
                 s.total,
-                s.albums.len()
+                tag_links(&s.years, "")
             )
         }
     };
@@ -978,6 +984,59 @@ pub fn photos(user: &User, features: Features, summary: Option<&photos::Summary>
         user,
         features,
         &format!("{}{body}", page_title("Photos")),
+    )
+}
+
+pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -> String {
+    let mut crumbs = String::from("<a href=\"/photos\">Photos</a>");
+    let mut path = String::new();
+    for t in &view.tags {
+        path.push_str(&crate::http::urlencode(t));
+        crumbs.push_str(&format!(" / <a href=\"/photos/t/{path}\">{}</a>", esc(t)));
+        path.push('/');
+    }
+    let subtags = if view.subtags.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<div class=\"mb-3\">{}</div>",
+            tag_links(&view.subtags, &path)
+        )
+    };
+    let rows: String = view
+        .photos
+        .iter()
+        .map(|p| format!("<tr><td>{}</td></tr>", esc(p)))
+        .collect();
+    let more = if view.total as usize > view.photos.len() {
+        format!(
+            "<p class=\"text-body-secondary small\">Showing first {} of {}.</p>",
+            view.photos.len(),
+            view.total
+        )
+    } else {
+        String::new()
+    };
+    let list = if view.photos.is_empty() {
+        "<div class=\"card shadow-sm\"><div class=\"card-body\">No photos.</div></div>".to_string()
+    } else {
+        format!(
+            "<div class=\"card shadow-sm\"><div class=\"table-responsive\">\
+             <table class=\"table table-hover align-middle mb-0\"><tbody>{rows}</tbody></table>\
+             </div></div>{more}"
+        )
+    };
+    app_page(
+        "Photos",
+        "photos",
+        user,
+        features,
+        &format!(
+            "{}<p class=\"small\">{crumbs}</p><p class=\"text-body-secondary small\">{} photos.</p>\
+             {subtags}{list}",
+            page_title("Photos"),
+            view.total
+        ),
     )
 }
 
@@ -1517,32 +1576,45 @@ mod tests {
     }
 
     #[test]
-    fn photos_page_lists_escaped_albums() {
+    fn photos_page_links_years_and_tags() {
         let u = user(1, "mike", true);
         let none = photos(&u, Features::default(), None);
         assert!(none.contains("not configured"));
+        let tc = |name: &str, count| photos::TagCount {
+            name: name.into(),
+            count,
+        };
         let summary = photos::Summary {
-            albums: vec![
-                photos::Album {
-                    name: "2018/<b>Trip</b>".into(),
-                    count: 4,
-                    taken_on: Some("2018-03-15".into()),
-                },
-                photos::Album {
-                    name: String::new(),
-                    count: 1,
-                    taken_on: None,
-                },
-            ],
+            years: vec![tc("2018", 4)],
+            other_tags: vec![tc("<b>mike</b>", 1)],
             total: 5,
+            untagged: 1,
             missing: 2,
             unsynced: 3,
         };
         let html = photos(&u, Features::default(), Some(&summary));
-        assert!(html.contains("3 not yet synced to local"));
-        assert!(html.contains("2018/&lt;b&gt;Trip&lt;/b&gt;"));
-        assert!(html.contains("(top level)"));
-        assert!(html.contains("5 photos in 2 albums, 2 missing from disk"));
+        assert!(html.contains("5 photos, 1 untagged, 2 missing from disk, 3 not yet synced"));
+        assert!(html.contains("href=\"/photos/t/2018\""));
+        assert!(html.contains("href=\"/photos/t/%3Cb%3Emike%3C%2Fb%3E\""));
+        assert!(html.contains("&lt;b&gt;mike&lt;/b&gt;"));
         assert!(html.contains("side-link active\" href=\"/photos\""));
+    }
+
+    #[test]
+    fn photo_tag_view_has_breadcrumbs_and_drilldown() {
+        let u = user(1, "mike", true);
+        let view = photos::TagView {
+            tags: vec!["2018".into()],
+            subtags: vec![photos::TagCount {
+                name: "2018-03".into(),
+                count: 2,
+            }],
+            photos: vec!["2018/<x>.jpg".into()],
+            total: 3,
+        };
+        let html = photo_tag_view(&u, Features::default(), &view);
+        assert!(html.contains("href=\"/photos/t/2018/2018-03\""));
+        assert!(html.contains("2018/&lt;x&gt;.jpg"));
+        assert!(html.contains("Showing first 1 of 3"));
     }
 }

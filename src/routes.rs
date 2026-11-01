@@ -84,6 +84,23 @@ fn authed(
                 pages::photos(user, features(cfg), summary.as_ref()),
             ))
         }
+        ("GET", ["photos", "t", tags @ ..])
+            if user.can(Feature::Photos) && cfg.photos.is_some() && !tags.is_empty() =>
+        {
+            let mut names: Vec<String> = Vec::new();
+            for t in tags {
+                match photos::normalize_tag(t) {
+                    Some(n) if !names.contains(&n) => names.push(n),
+                    Some(_) => {}
+                    None => return Ok(Resp::html(404, pages::not_found())),
+                }
+            }
+            let view = photos::tag_view(conn, &names)?;
+            Ok(Resp::html(
+                200,
+                pages::photo_tag_view(user, features(cfg), &view),
+            ))
+        }
         ("GET", [page @ "recipes"]) if Feature::parse(page).is_some_and(|f| user.can(f)) => {
             let feature = Feature::parse(page).expect("matched above");
             Ok(Resp::html(
