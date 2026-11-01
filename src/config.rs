@@ -29,26 +29,6 @@ pub struct Pickle {
     pub member_id: String,
     pub username: String,
     pub password: String,
-    #[serde(default)]
-    pub schedule: Vec<ScheduleEntry>,
-}
-
-#[derive(Deserialize)]
-pub struct ScheduleEntry {
-    pub day: String,
-    pub start: String,
-    #[serde(default = "default_duration")]
-    pub duration: i64,
-    #[serde(default = "default_court")]
-    pub court: String,
-}
-
-fn default_duration() -> i64 {
-    90
-}
-
-fn default_court() -> String {
-    "any".to_string()
 }
 
 #[derive(Deserialize)]
@@ -94,7 +74,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pickle_section_is_optional_and_defaults_the_schedule() {
+    fn pickle_section_is_optional() {
         let base =
             "db_path = \"x\"\n[smtp]\nhost=\"h\"\nusername=\"u\"\npassword=\"p\"\nfrom=\"f\"\n";
         assert!(toml::from_str::<Config>(base).unwrap().pickle.is_none());
@@ -102,12 +82,16 @@ mod tests {
         let photos = toml::from_str::<Config>(&format!("{base}[photos]\ndir=\"/p\"\n")).unwrap();
         assert_eq!(photos.photos.unwrap().dir, "/p");
         let with = format!(
-            "{base}[pickle]\nfull_name=\"A B\"\nmember_id=\"1\"\nusername=\"u\"\npassword=\"p\"\n\
-             [[pickle.schedule]]\nday=\"saturday\"\nstart=\"10:00\"\n"
+            "{base}[pickle]\nfull_name=\"A B\"\nmember_id=\"1\"\nusername=\"u\"\npassword=\"p\"\n"
         );
-        let cfg = toml::from_str::<Config>(&with).unwrap();
-        let entry = &cfg.pickle.unwrap().schedule[0];
-        assert_eq!((entry.duration, entry.court.as_str()), (90, "any"));
+        assert_eq!(
+            toml::from_str::<Config>(&with)
+                .unwrap()
+                .pickle
+                .unwrap()
+                .member_id,
+            "1"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod api;
 pub mod dashboard;
 mod history;
 mod ops;
+pub mod slots;
 pub mod time;
 
 use crate::{cli, config, db};
@@ -168,6 +169,7 @@ fn in_run(
     let now = Timestamp::now();
     let cutoff = time::plus_millis(now, -history::RETENTION_DAYS * 24 * 3600 * 1000);
     history::prune(conn, &time::iso(cutoff)).map_err(api::db_err)?;
+    slots::prune_past(conn, &time::central(now)?.date().to_string()).map_err(api::db_err)?;
     let run_id =
         history::start_run(conn, name, &cfg.full_name, &time::iso(now)).map_err(api::db_err)?;
 

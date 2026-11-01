@@ -2,6 +2,7 @@ use crate::auth::{Feature, User};
 use crate::config::Quackr;
 use crate::photos;
 use crate::pickle::dashboard::{self, Dashboard};
+use crate::pickle::{slots, time as pickle_time};
 use crate::sms::{self, Sms};
 use crate::trips::{self, Item, Kind, Trip};
 
@@ -549,7 +550,13 @@ fn booking_row(b: &dashboard::Booking, now: i64) -> String {
     )
 }
 
-pub fn pickle(user: &User, features: Features, data: &Dashboard, now: i64) -> String {
+pub fn pickle(
+    user: &User,
+    features: Features,
+    data: &Dashboard,
+    now: i64,
+    error: Option<&str>,
+) -> String {
     let rows: String = data.bookings.iter().map(|b| booking_row(b, now)).collect();
     let refreshed = data
         .bookings
@@ -572,7 +579,7 @@ pub fn pickle(user: &User, features: Features, data: &Dashboard, now: i64) -> St
         user,
         features,
         &format!(
-            "{}<div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
+            "{}{}{}<div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
              <table class=\"table table-hover align-middle mb-0\">\
              <thead><tr><th>Date</th><th>Time</th><th>Court</th><th>Checked in?</th><th></th></tr></thead>\
              <tbody>{rows}</tbody></table></div></div>\
@@ -580,9 +587,118 @@ pub fn pickle(user: &User, features: Features, data: &Dashboard, now: i64) -> St
              <details class=\"pt-3\"><summary class=\"btn btn-sm btn-outline-secondary\">History</summary>\
              <h2 class=\"h6 pt-3\">Last {} days</h2>{history}</details>",
             page_title("Pickleball"),
+            alert(error),
+            slots_card(&data.slots),
             esc(&refreshed),
             dashboard::HISTORY_DAYS,
         ),
+    )
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+fn clock(minutes_since_midnight: i64) -> String {
+    let (h, m) = (
+        minutes_since_midnight / 60 % 24,
+        minutes_since_midnight % 60,
+    );
+    format!(
+        "{}:{m:02}{}",
+        if h % 12 == 0 { 12 } else { h % 12 },
+        if h < 12 { "am" } else { "pm" }
+    )
+}
+
+fn slot_row(s: &slots::Slot) -> String {
+    let when = match (&s.day, &s.date) {
+        (Some(day), _) => format!("Every {}", capitalize(day)),
+        (None, Some(date)) => date
+            .parse::<jiff::civil::Date>()
+            .map(|d| d.strftime("%a %b %-d").to_string())
+            .unwrap_or_else(|_| date.clone()),
+        (None, None) => String::new(),
+    };
+    let from = pickle_time::parse_hhmm(&s.start)
+        .map(|(h, m)| i64::from(h) * 60 + i64::from(m))
+        .unwrap_or(0);
+    let time = format!("{} - {}", clock(from), clock(from + s.minutes));
+    format!(
+        "<tr><td>{}</td><td>{}</td><td>{}</td><td class=\"text-end\">\
+         <form method=\"post\" action=\"/pickle/slots/{}/delete\" class=\"d-inline\" \
+         onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"{}\">\
+         <button class=\"btn btn-sm btn-outline-danger\">Remove</button></form></td></tr>",
+        esc(&when),
+        esc(&time),
+        esc(&capitalize(&s.court)),
+        s.id,
+        esc(&format!("Remove {when}, {time}?")),
+    )
+}
+
+fn options(values: &[(String, String)], selected: &str) -> String {
+    values
+        .iter()
+        .map(|(value, label)| {
+            format!(
+                "<option value=\"{}\"{}>{}</option>",
+                esc(value),
+                if value == selected { " selected" } else { "" },
+                esc(label)
+            )
+        })
+        .collect()
+}
+
+fn slots_card(rows: &[slots::Slot]) -> String {
+    let body = if rows.is_empty() {
+        "<tr><td colspan=\"4\" class=\"text-body-secondary\">Nothing scheduled.</td></tr>"
+            .to_string()
+    } else {
+        rows.iter().map(slot_row).collect()
+    };
+    let capitalized = |values: &[&str]| -> Vec<(String, String)> {
+        values
+            .iter()
+            .map(|v| (v.to_string(), capitalize(v)))
+            .collect()
+    };
+    let days = options(&capitalized(&slots::DAYS), "saturday");
+    let lengths = options(
+        &slots::MINUTES
+            .iter()
+            .map(|m| (m.to_string(), format!("{m} min")))
+            .collect::<Vec<_>>(),
+        "90",
+    );
+    let courts = options(&capitalized(&slots::COURT_CHOICES), "any");
+    format!(
+        "<h2 class=\"h5 mt-2\">Reservations</h2>\
+         <div class=\"card shadow-sm mb-2\"><div class=\"table-responsive\">\
+         <table class=\"table align-middle mb-0\">\
+         <thead><tr><th>When</th><th>Time</th><th>Court</th><th></th></tr></thead>\
+         <tbody>{body}</tbody></table></div></div>\
+         <form method=\"post\" action=\"/pickle/slots\" class=\"row g-2 align-items-end mb-4\">\
+         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Repeats</label>\
+         <select name=\"kind\" class=\"form-select\"><option value=\"weekly\">Every week</option>\
+         <option value=\"once\">One time</option></select></div>\
+         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Day (weekly)</label>\
+         <select name=\"day\" class=\"form-select\">{days}</select></div>\
+         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Date (one time)</label>\
+         <input type=\"date\" name=\"date\" class=\"form-control\"></div>\
+         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Start</label>\
+         <input type=\"time\" name=\"start\" value=\"07:30\" required class=\"form-control\"></div>\
+         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Length</label>\
+         <select name=\"minutes\" class=\"form-select\">{lengths}</select></div>\
+         <div class=\"col-6 col-md\"><label class=\"form-label small mb-0\">Court</label>\
+         <select name=\"court\" class=\"form-select\">{courts}</select></div>\
+         <div class=\"col-12 col-md-auto\"><button class=\"btn btn-primary w-100\">Add</button></div>\
+         </form>"
     )
 }
 
@@ -1081,6 +1197,7 @@ mod tests {
         let admin = user(1, "mike", true);
         let member = member_with(vec![Feature::Pickle]);
         let data = Dashboard {
+            slots: vec![],
             bookings: vec![],
             runs: vec![],
         };
@@ -1089,9 +1206,8 @@ mod tests {
             let html = home(u, pickle_on());
             assert!(html.contains("side-link\" href=\"/pickle\""));
             assert!(html.contains("class=\"tile\" href=\"/pickle\""));
-            assert!(
-                pickle(u, pickle_on(), &data, 0).contains("side-link active\" href=\"/pickle\"")
-            );
+            assert!(pickle(u, pickle_on(), &data, 0, None)
+                .contains("side-link active\" href=\"/pickle\""));
         }
     }
 
@@ -1126,13 +1242,20 @@ mod tests {
     #[test]
     fn pickle_cancel_form_only_for_future_bookings_and_asks_first() {
         let data = Dashboard {
+            slots: vec![],
             bookings: vec![
                 booking("11", "2000-01-01T15:00:00.000Z", "5C"),
                 booking("22", "2099-01-01T15:00:00.000Z", "6B"),
             ],
             runs: vec![],
         };
-        let html = pickle(&user(2, "sam", false), pickle_on(), &data, 1_000_000_000);
+        let html = pickle(
+            &user(2, "sam", false),
+            pickle_on(),
+            &data,
+            1_000_000_000,
+            None,
+        );
         assert!(!html.contains("/pickle/bookings/11/cancel"));
         assert!(html.contains("/pickle/bookings/22/cancel"));
         assert!(html.contains("data-msg=\"Are you sure you want to cancel"));
@@ -1141,24 +1264,55 @@ mod tests {
     }
 
     #[test]
-    fn pickle_empty_state_and_refreshed_caption() {
-        let empty = Dashboard {
+    fn pickle_slots_card_lists_rows_with_remove_and_the_add_form() {
+        let slot = |id, day: Option<&str>, date: Option<&str>, court: &str| slots::Slot {
+            id,
+            day: day.map(str::to_string),
+            date: date.map(str::to_string),
+            start: "07:30".into(),
+            minutes: 90,
+            court: court.into(),
+        };
+        let data = Dashboard {
+            slots: vec![
+                slot(3, Some("saturday"), None, "any"),
+                slot(4, None, Some("2026-11-12"), "<5C>"),
+            ],
             bookings: vec![],
             runs: vec![],
         };
-        assert!(pickle(&user(1, "mike", true), pickle_on(), &empty, 0)
+        let html = pickle(&user(1, "mike", true), pickle_on(), &data, 0, Some("<bad>"));
+        assert!(html.contains("Every Saturday"));
+        assert!(html.contains("Thu Nov 12"));
+        assert!(html.contains("7:30am - 9:00am"));
+        assert!(html.contains("/pickle/slots/3/delete"));
+        assert!(html.contains("&lt;5C&gt;") && !html.contains("<5C>"));
+        assert!(html.contains("action=\"/pickle/slots\""));
+        assert!(html.contains("&lt;bad&gt;"));
+    }
+
+    #[test]
+    fn pickle_empty_state_and_refreshed_caption() {
+        let empty = Dashboard {
+            slots: vec![],
+            bookings: vec![],
+            runs: vec![],
+        };
+        assert!(pickle(&user(1, "mike", true), pickle_on(), &empty, 0, None)
             .contains("No upcoming bookings."));
         let some = Dashboard {
+            slots: vec![],
             bookings: vec![booking("1", "2099-01-01T15:00:00.000Z", "6B")],
             runs: vec![],
         };
-        assert!(pickle(&user(1, "mike", true), pickle_on(), &some, 0)
+        assert!(pickle(&user(1, "mike", true), pickle_on(), &some, 0, None)
             .contains("Refreshed Sunday October 18 2026"));
     }
 
     #[test]
     fn pickle_text_is_escaped() {
         let data = Dashboard {
+            slots: vec![],
             bookings: vec![booking("1", "2099-01-01T15:00:00.000Z", "<i>x</i>")],
             runs: vec![dashboard::Run {
                 started_at: "2026-10-18T13:30:00Z".to_string(),
@@ -1180,7 +1334,7 @@ mod tests {
                 }],
             }],
         };
-        let html = pickle(&user(1, "mike", true), pickle_on(), &data, 0);
+        let html = pickle(&user(1, "mike", true), pickle_on(), &data, 0, None);
         for raw in ["<i>x</i>", "<script>", "<b>504</b>", "<e>"] {
             assert!(!html.contains(raw), "{raw}");
         }
@@ -1211,18 +1365,20 @@ mod tests {
             requests: (0..n).map(|_| req()).collect(),
         };
         let one = Dashboard {
+            slots: vec![],
             bookings: vec![],
             runs: vec![run(1)],
         };
-        let html = pickle(&user(1, "mike", true), pickle_on(), &one, 0);
+        let html = pickle(&user(1, "mike", true), pickle_on(), &one, 0, None);
         assert!(html.contains(">History</summary>"));
         assert!(html.contains("Last 7 days"));
         assert!(!html.contains("1 request"));
         let many = Dashboard {
+            slots: vec![],
             bookings: vec![],
             runs: vec![run(6)],
         };
-        assert!(pickle(&user(1, "mike", true), pickle_on(), &many, 0).contains("6 requests"));
+        assert!(pickle(&user(1, "mike", true), pickle_on(), &many, 0, None).contains("6 requests"));
     }
 
     #[test]

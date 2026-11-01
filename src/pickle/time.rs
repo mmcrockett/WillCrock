@@ -36,6 +36,12 @@ pub fn rfc3339_offset(z: &Zoned) -> String {
     z.strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
 
+pub fn parse_hhmm(s: &str) -> Option<(i8, i8)> {
+    let (h, m) = s.split_once(':')?;
+    let (h, m) = (h.trim().parse::<i8>().ok()?, m.trim().parse::<i8>().ok()?);
+    ((0..24).contains(&h) && (0..60).contains(&m)).then_some((h, m))
+}
+
 pub fn parse(iso: &str) -> Result<Timestamp, String> {
     iso.parse::<Timestamp>()
         .map_err(|e| format!("bad time {iso:?}: {e}"))
@@ -82,6 +88,15 @@ mod tests {
         let end = ts("2026-10-18T15:00:00Z");
         assert_eq!(slot_label(start, None), "Sun Oct 18 8:30am");
         assert_eq!(slot_label(start, Some(end)), "Sun Oct 18 8:30-10:00am");
+    }
+
+    #[test]
+    fn parse_hhmm_bounds() {
+        assert_eq!(parse_hhmm("07:30"), Some((7, 30)));
+        assert_eq!(parse_hhmm(" 7 : 5 "), Some((7, 5)));
+        for bad in ["730", "24:00", "07:60", "-1:00", "a:b", ""] {
+            assert_eq!(parse_hhmm(bad), None, "{bad}");
+        }
     }
 
     #[test]
