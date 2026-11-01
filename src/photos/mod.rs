@@ -17,17 +17,101 @@ pub struct ScanReport {
     pub missing: usize,
 }
 
-pub struct Album {
+pub struct TagCount {
     pub name: String,
     pub count: i64,
-    pub taken_on: Option<String>,
 }
 
 pub struct Summary {
-    pub albums: Vec<Album>,
+    pub years: Vec<TagCount>,
+    pub other_tags: Vec<TagCount>,
     pub total: i64,
+    pub untagged: i64,
     pub missing: i64,
     pub unsynced: i64,
+}
+
+pub struct TagView {
+    pub tags: Vec<String>,
+    pub subtags: Vec<TagCount>,
+    pub photos: Vec<String>,
+    pub total: i64,
+}
+
+pub const TAG_VIEW_LIMIT: usize = 500;
+
+pub fn normalize_tag(raw: &str) -> Option<String> {
+    let t = raw.trim().to_lowercase();
+    (!t.is_empty() && !t.contains('/')).then_some(t)
+}
+
+pub fn is_year_tag(name: &str) -> bool {
+    name.len() == 4 && name.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_month_tag(name: &str) -> bool {
+    name.len() == 7
+        && name.as_bytes()[4] == b'-'
+        && name[..4].bytes().all(|b| b.is_ascii_digit())
+        && name[5..].bytes().all(|b| b.is_ascii_digit())
+}
+
+fn add_tag(tx: &rusqlite::Transaction, photo_id: i64, name: &str) -> rusqlite::Result<()> {
+    tx.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", [name])?;
+    tx.execute(
+        "INSERT OR IGNORE INTO photo_tags (photo_id, tag_id) \
+         SELECT ?1, id FROM tags WHERE name = ?2",
+        params![photo_id, name],
+    )?;
+    Ok(())
+}
+
+const LIVE_WITH_ALL_TAGS: &str = "SELECT p.id FROM photos p WHERE p.missing_at IS NULL AND \
+     (SELECT COUNT(*) FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
+      WHERE pt.photo_id = p.id AND t.name IN ({in})) = {n}";
+
+fn live_with_all_tags(tags: &[String]) -> String {
+    let marks = vec!["?"; tags.len()].join(",");
+    LIVE_WITH_ALL_TAGS
+        .replace("{in}", &marks)
+        .replace("{n}", &tags.len().to_string())
+}
+
+pub fn tag_view(conn: &Connection, tags: &[String]) -> rusqlite::Result<TagView> {
+    let ids = live_with_all_tags(tags);
+    let args = || rusqlite::params_from_iter(tags.iter());
+    let marks = vec!["?"; tags.len()].join(",");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT t.name, COUNT(*) FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
+         WHERE pt.photo_id IN ({ids}) AND t.name NOT IN ({marks}) \
+         GROUP BY t.id ORDER BY t.name"
+    ))?;
+    let subtags = stmt
+        .query_map(
+            rusqlite::params_from_iter(tags.iter().chain(tags.iter())),
+            |r| {
+                Ok(TagCount {
+                    name: r.get(0)?,
+                    count: r.get(1)?,
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let total = conn.query_row(&format!("SELECT COUNT(*) FROM ({ids})"), args(), |r| {
+        r.get(0)
+    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT path FROM photos WHERE id IN ({ids}) ORDER BY path LIMIT {TAG_VIEW_LIMIT}"
+    ))?;
+    let photos = stmt
+        .query_map(args(), |r| r.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(TagView {
+        tags: tags.to_vec(),
+        subtags,
+        photos,
+        total,
+    })
 }
 
 pub fn run(args: &[String]) {
@@ -114,18 +198,34 @@ pub fn mark_synced(
 
 pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
     let mut stmt = conn.prepare(
-        "SELECT album, COUNT(*), MIN(taken_on) FROM photos WHERE missing_at IS NULL \
-         GROUP BY album ORDER BY album DESC",
+        "SELECT t.name, COUNT(*) FROM photo_tags pt \
+         JOIN tags t ON t.id = pt.tag_id JOIN photos p ON p.id = pt.photo_id \
+         WHERE p.missing_at IS NULL GROUP BY t.id ORDER BY t.name",
     )?;
-    let albums = stmt
+    let counts = stmt
         .query_map([], |r| {
-            Ok(Album {
+            Ok(TagCount {
                 name: r.get(0)?,
                 count: r.get(1)?,
-                taken_on: r.get(2)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let (mut years, other_tags): (Vec<_>, Vec<_>) = counts
+        .into_iter()
+        .filter(|t| !is_month_tag(&t.name))
+        .partition(|t| is_year_tag(&t.name));
+    years.reverse();
+    let total = conn.query_row(
+        "SELECT COUNT(*) FROM photos WHERE missing_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let untagged = conn.query_row(
+        "SELECT COUNT(*) FROM photos p WHERE p.missing_at IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM photo_tags WHERE photo_id = p.id)",
+        [],
+        |r| r.get(0),
+    )?;
     let missing = conn.query_row(
         "SELECT COUNT(*) FROM photos WHERE missing_at IS NOT NULL",
         [],
@@ -137,8 +237,10 @@ pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
         |r| r.get(0),
     )?;
     Ok(Summary {
-        total: albums.iter().map(|a| a.count).sum(),
-        albums,
+        years,
+        other_tags,
+        total,
+        untagged,
         missing,
         unsynced,
     })
@@ -193,6 +295,11 @@ pub fn scan(conn: &mut Connection, root: &Path, now: i64) -> Result<ScanReport, 
                     ],
                 )
                 .map_err(db_err)?;
+                let id = tx.last_insert_rowid();
+                if let Some(taken_on) = taken_on_from_album(album_of(&f.rel)) {
+                    add_tag(&tx, id, &taken_on[..4]).map_err(db_err)?;
+                    add_tag(&tx, id, &taken_on[..7]).map_err(db_err)?;
+                }
                 report.added += 1;
             }
         }
@@ -372,8 +479,55 @@ mod tests {
         );
         let s = summary(&conn).unwrap();
         assert_eq!(s.total, 3);
-        assert_eq!(s.albums.len(), 3);
+        assert_eq!(s.untagged, 1);
+        let years: Vec<_> = s.years.iter().map(|t| (t.name.as_str(), t.count)).collect();
+        assert_eq!(years, vec![("2018", 2)]);
+        assert!(s.other_tags.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tag_view_drills_into_months_and_intersects() {
+        let root = library("tagview");
+        let mut conn = db::open_memory();
+        scan(&mut conn, &root, 100).unwrap();
+        let year = tag_view(&conn, &["2018".to_string()]).unwrap();
+        assert_eq!(year.total, 2);
+        let months: Vec<_> = year.subtags.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(months, vec!["2018-03", "2018-09"]);
+        let month = tag_view(&conn, &["2018".to_string(), "2018-03".to_string()]).unwrap();
+        assert_eq!(month.photos, vec!["2018/20180315_RedRiverTrip/IMG_1.JPG"]);
+        assert!(month.subtags.is_empty());
+        let none = tag_view(&conn, &["nope".to_string()]).unwrap();
+        assert_eq!(none.total, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_tags_show_as_other_and_migration_backfills() {
+        let root = library("manual");
+        let mut conn = db::open_memory();
+        scan(&mut conn, &root, 100).unwrap();
+        let id: i64 = conn
+            .query_row("SELECT id FROM photos WHERE path = 'mike.jpg'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let tx = conn.transaction().unwrap();
+        add_tag(&tx, id, "mike").unwrap();
+        tx.commit().unwrap();
+        let s = summary(&conn).unwrap();
+        assert_eq!(s.other_tags.len(), 1);
+        assert_eq!(s.other_tags[0].name, "mike");
+        assert_eq!(s.untagged, 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn normalizes_tag_names() {
+        assert_eq!(normalize_tag(" Mike ").as_deref(), Some("mike"));
+        assert_eq!(normalize_tag("a/b"), None);
+        assert_eq!(normalize_tag("  "), None);
     }
 
     #[test]
