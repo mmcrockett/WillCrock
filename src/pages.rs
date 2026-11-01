@@ -840,11 +840,13 @@ pub fn photos(user: &User, features: Features, summary: Option<&photos::Summary>
                     )
                 })
                 .collect();
-            let missing = if s.missing > 0 {
-                format!(", {} missing from disk", s.missing)
-            } else {
-                String::new()
-            };
+            let mut missing = String::new();
+            if s.missing > 0 {
+                missing.push_str(&format!(", {} missing from disk", s.missing));
+            }
+            if s.unsynced > 0 {
+                missing.push_str(&format!(", {} not yet synced to local", s.unsynced));
+            }
             format!(
                 "<p class=\"text-body-secondary small\">{} photos in {} albums{missing}.</p>\
                  <div class=\"card shadow-sm\"><div class=\"table-responsive\">\
@@ -1370,8 +1372,10 @@ mod tests {
             ],
             total: 5,
             missing: 2,
+            unsynced: 3,
         };
         let html = photos(&u, Features::default(), Some(&summary));
+        assert!(html.contains("3 not yet synced to local"));
         assert!(html.contains("2018/&lt;b&gt;Trip&lt;/b&gt;"));
         assert!(html.contains("(top level)"));
         assert!(html.contains("5 photos in 2 albums, 2 missing from disk"));
