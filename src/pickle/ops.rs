@@ -1,11 +1,12 @@
 use super::api::{db_err, Client, Req, Res, Response, API};
 use super::history::{self, BookingRow};
+use super::slots;
 use super::time;
 use jiff::Timestamp;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-const COURTS: [(&str, i64); 5] = [
+pub const COURTS: [(&str, i64); 5] = [
     ("5", 1176),
     ("5C", 1178),
     ("5D", 1179),
@@ -216,12 +217,11 @@ impl Client<'_> {
             .strftime("%A")
             .to_string()
             .to_lowercase();
-        let entries: Vec<_> = self
-            .cfg
-            .schedule
-            .iter()
-            .filter(|e| e.day.to_lowercase() == weekday)
-            .map(|e| (e.start.clone(), e.duration, e.court.clone()))
+        let target = time::central_at(self.now(), 7, 0, 0)?.date().to_string();
+        let entries: Vec<_> = slots::due(self.conn, &weekday, &target)
+            .map_err(db_err)?
+            .into_iter()
+            .map(|s| (s.start, s.minutes, s.court))
             .collect();
 
         if !entries.is_empty() {
@@ -262,9 +262,7 @@ impl Client<'_> {
     ) -> Res<Response> {
         let minutes = minutes.unwrap_or(90);
         let (label, attempts) = court_attempts(court.unwrap_or("ANY"))?;
-        let (hr, min) = start
-            .split_once(':')
-            .and_then(|(h, m)| Some((h.trim().parse::<i8>().ok()?, m.trim().parse::<i8>().ok()?)))
+        let (hr, min) = time::parse_hhmm(start)
             .ok_or_else(|| format!("bad start {start:?}, expected HH:MM"))?;
 
         let start_ts = time::central_at(self.now(), 7, hr, min)?.timestamp();
@@ -375,6 +373,15 @@ mod tests {
             start_time: start.to_string(),
             end_time: start.to_string(),
         }
+    }
+
+    fn seed_slot(conn: &rusqlite::Connection, day: Option<&str>, date: Option<&str>, start: &str) {
+        conn.execute(
+            "INSERT INTO pickle_slots (day, date, start, minutes, court, created_at) \
+             VALUES (?1, ?2, ?3, 60, '5C', 0)",
+            rusqlite::params![day, date, start],
+        )
+        .unwrap();
     }
 
     fn with_token(conn: &rusqlite::Connection) {
@@ -518,22 +525,10 @@ mod tests {
     #[test]
     fn reserve_today_waits_for_six_then_books_todays_entries() {
         let conn = open_memory();
-        let (fake, mut cfg) = (Fake::default(), cfg());
+        let (fake, cfg) = (Fake::default(), cfg());
         with_token(&conn);
-        cfg.schedule = vec![
-            crate::config::ScheduleEntry {
-                day: "Saturday".into(),
-                start: "10:00".into(),
-                duration: 60,
-                court: "5C".into(),
-            },
-            crate::config::ScheduleEntry {
-                day: "monday".into(),
-                start: "10:00".into(),
-                duration: 60,
-                court: "5C".into(),
-            },
-        ];
+        seed_slot(&conn, Some("saturday"), None, "10:00");
+        seed_slot(&conn, Some("monday"), None, "10:00");
         fake.push(200, r#"{"payload":[]}"#);
         fake.push(200, r#"{"message":"ok"}"#);
         let (mut c, clock) = client(&fake, &conn, &cfg, "2026-10-17T10:55:00Z");
@@ -552,16 +547,33 @@ mod tests {
     }
 
     #[test]
+    fn reserve_today_books_a_one_off_dated_a_week_out_alongside_weekly_rows() {
+        let conn = open_memory();
+        let (fake, cfg) = (Fake::default(), cfg());
+        with_token(&conn);
+        seed_slot(&conn, Some("saturday"), None, "10:00");
+        seed_slot(&conn, None, Some("2026-10-24"), "12:00");
+        seed_slot(&conn, None, Some("2026-10-25"), "12:00");
+        fake.push(200, r#"{"payload":[]}"#);
+        fake.push(200, r#"{"message":"ok"}"#);
+        fake.push(200, r#"{"message":"ok"}"#);
+        let (mut c, _) = client(&fake, &conn, &cfg, "2026-10-17T10:55:00Z");
+        assert_eq!(c.reserve_today(false).unwrap().len(), 2);
+        assert_eq!(
+            c.notes,
+            [
+                "booked Sat Oct 24 10:00-11:00am court 5C",
+                "booked Sat Oct 24 12:00-1:00pm court 5C"
+            ]
+        );
+    }
+
+    #[test]
     fn a_failing_warmup_refreshes_the_token_and_still_books() {
         let conn = open_memory();
-        let (fake, mut cfg) = (Fake::default(), cfg());
+        let (fake, cfg) = (Fake::default(), cfg());
         with_token(&conn);
-        cfg.schedule = vec![crate::config::ScheduleEntry {
-            day: "saturday".into(),
-            start: "10:00".into(),
-            duration: 60,
-            court: "5C".into(),
-        }];
+        seed_slot(&conn, Some("saturday"), None, "10:00");
         for _ in 0..3 {
             fake.push(500, "boom");
         }

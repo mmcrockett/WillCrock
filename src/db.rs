@@ -111,6 +111,20 @@ CREATE INDEX photos_album ON photos(album);
 CREATE INDEX photos_sha256 ON photos(sha256);
 ",
     "ALTER TABLE photos ADD COLUMN synced_at INTEGER;",
+    "
+CREATE TABLE pickle_slots (
+  id INTEGER PRIMARY KEY,
+  day TEXT CHECK (day IN ('monday','tuesday','wednesday','thursday','friday','saturday','sunday')),
+  date TEXT,
+  start TEXT NOT NULL,
+  minutes INTEGER NOT NULL,
+  court TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  CHECK ((day IS NULL) != (date IS NULL))
+);
+CREATE UNIQUE INDEX pickle_slots_weekly ON pickle_slots(day, start) WHERE day IS NOT NULL;
+CREATE UNIQUE INDEX pickle_slots_once ON pickle_slots(date, start) WHERE date IS NOT NULL;
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
@@ -163,5 +177,22 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn pickle_slots_need_exactly_one_of_day_and_date() {
+        let conn = open_memory();
+        let insert = |day: &str, date: &str| {
+            conn.execute(
+                "INSERT INTO pickle_slots (day, date, start, minutes, court, created_at) \
+                 VALUES (nullif(?1, ''), nullif(?2, ''), '10:00', 90, 'any', 0)",
+                [day, date],
+            )
+        };
+        assert!(insert("saturday", "").is_ok());
+        assert!(insert("", "2026-11-20").is_ok());
+        assert!(insert("saturday", "2026-11-21").is_err());
+        assert!(insert("", "").is_err());
+        assert!(insert("funday", "").is_err());
     }
 }

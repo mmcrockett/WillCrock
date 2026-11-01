@@ -1,3 +1,4 @@
+use super::slots::{self, Slot};
 use super::time;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -36,6 +37,7 @@ pub struct Run {
 }
 
 pub struct Dashboard {
+    pub slots: Vec<Slot>,
     pub bookings: Vec<Booking>,
     pub runs: Vec<Run>,
 }
@@ -46,6 +48,7 @@ pub fn load(conn: &Connection, now: i64) -> rusqlite::Result<Dashboard> {
         -HISTORY_DAYS * 24 * 3600 * 1000,
     );
     Ok(Dashboard {
+        slots: slots::list(conn)?,
         bookings: bookings(conn)?,
         runs: runs_since(conn, &time::iso(cutoff))?,
     })

@@ -70,7 +70,9 @@ fn authed(
         (_, ["admin", ..]) if !user.is_admin => Ok(Resp::html(404, pages::not_found())),
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
         ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
-        ("GET", ["pickle"]) if user.can(Feature::Pickle) => pickle_page(conn, cfg, user, now),
+        ("GET", ["pickle"]) if user.can(Feature::Pickle) => {
+            pickle_page(conn, cfg, user, now, None, 200)
+        }
         ("GET", ["photos"]) if user.can(Feature::Photos) => {
             let summary = if cfg.photos.is_some() {
                 Some(photos::summary(conn)?)
@@ -91,6 +93,15 @@ fn authed(
         }
         (_, ["trips", rest @ ..]) if user.can(Feature::Trips) => {
             trips_route(conn, cfg, req, user, rest, now)
+        }
+        ("POST", ["pickle", "slots"]) if user.can(Feature::Pickle) => {
+            pickle_slot_add(conn, cfg, req, user, now)
+        }
+        ("POST", ["pickle", "slots", id, "delete"]) if user.can(Feature::Pickle) => {
+            match id.parse::<i64>() {
+                Ok(id) if pickle::slots::delete(conn, id)? > 0 => Ok(Resp::redirect("/pickle")),
+                _ => Ok(Resp::html(404, pages::not_found())),
+            }
         }
         ("POST", ["pickle", "bookings", id, "cancel"]) if user.can(Feature::Pickle) => {
             pickle_cancel(conn, cfg, user, id)
@@ -260,15 +271,48 @@ fn trips_route(
     }
 }
 
-fn pickle_page(conn: &Connection, cfg: &Config, user: &User, now: i64) -> rusqlite::Result<Resp> {
+fn pickle_page(
+    conn: &Connection,
+    cfg: &Config,
+    user: &User,
+    now: i64,
+    error: Option<&str>,
+    status: u16,
+) -> rusqlite::Result<Resp> {
     if cfg.pickle.is_none() {
         return Ok(Resp::html(404, pages::not_found()));
     }
     let data = pickle::dashboard::load(conn, now)?;
     Ok(Resp::html(
-        200,
-        pages::pickle(user, features(cfg), &data, now),
+        status,
+        pages::pickle(user, features(cfg), &data, now, error),
     ))
+}
+
+fn pickle_slot_add(
+    conn: &Connection,
+    cfg: &Config,
+    req: &Req,
+    user: &User,
+    now: i64,
+) -> rusqlite::Result<Resp> {
+    let field = |key: &str| req.form.get(key).map(String::as_str).unwrap_or("");
+    let form = pickle::slots::Form {
+        kind: field("kind"),
+        day: field("day"),
+        date: field("date"),
+        start: field("start"),
+        minutes: field("minutes"),
+        court: field("court"),
+    };
+    let error = match pickle::slots::parse(&form, now) {
+        Ok(input) if pickle::slots::add(conn, &input, now)? => {
+            return Ok(Resp::redirect("/pickle"))
+        }
+        Ok(_) => "That day and start time is already scheduled.".to_string(),
+        Err(e) => e,
+    };
+    pickle_page(conn, cfg, user, now, Some(&error), 400)
 }
 
 fn pickle_cancel(conn: &Connection, cfg: &Config, user: &User, id: &str) -> rusqlite::Result<Resp> {

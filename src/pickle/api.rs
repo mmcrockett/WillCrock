@@ -413,7 +413,6 @@ pub mod testing {
             member_id: "176064".into(),
             username: "willcrock".into(),
             password: "pw".into(),
-            schedule: vec![],
         }
     }
 
