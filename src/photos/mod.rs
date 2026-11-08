@@ -61,7 +61,7 @@ pub const TAG_VIEW_LIMIT: i64 = 60;
 
 pub fn normalize_tag(raw: &str) -> Option<String> {
     let t = raw.trim().to_lowercase();
-    (!t.is_empty() && !t.contains('/')).then_some(t)
+    (!t.is_empty() && !t.contains('/') && t != "." && t != "..").then_some(t)
 }
 
 pub fn is_year_tag(name: &str) -> bool {
@@ -160,7 +160,7 @@ pub fn parse_tags(raw: &str) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     for item in raw.split(',').filter(|item| !item.trim().is_empty()) {
         let Some(name) = normalize_tag(item) else {
-            return Err("Tags cannot contain slashes.".into());
+            return Err("Tags cannot contain slashes or be '.' or '..'.".into());
         };
         if name.chars().count() > 50 || is_year_tag(&name) || is_month_tag(&name) {
             return Err(
@@ -651,7 +651,11 @@ mod tests {
     fn normalizes_tag_names() {
         assert_eq!(normalize_tag(" Mike ").as_deref(), Some("mike"));
         assert_eq!(normalize_tag("a/b"), None);
+        assert_eq!(normalize_tag("."), None);
+        assert_eq!(normalize_tag(".."), None);
         assert_eq!(normalize_tag("  "), None);
+        assert!(parse_tags(".").is_err());
+        assert!(parse_tags("..").is_err());
     }
 
     #[test]
