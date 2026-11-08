@@ -61,6 +61,18 @@ fn authed(
     token: &str,
     now: i64,
 ) -> rusqlite::Result<Resp> {
+    if let Some(status) = req.body_error {
+        return Ok(if req.path == "/photos/upload" {
+            Resp::json(
+                status,
+                &serde_json::json!({
+                    "error": if status == 413 { "Photo exceeds 25 MB." } else { "Could not read the upload." }
+                }),
+            )
+        } else {
+            Resp::html(status, pages::error())
+        });
+    }
     match (req.method.as_str(), segs) {
         ("GET", []) => Ok(Resp::html(200, pages::home(user, features(cfg)))),
         ("POST", ["logout"]) => {
@@ -83,6 +95,46 @@ fn authed(
                 200,
                 pages::photos(user, features(cfg), summary.as_ref()),
             ))
+        }
+        ("POST", ["photos", "upload"]) if user.can(Feature::Photos) && cfg.photos.is_some() => {
+            if req.requested_with != "1" || req.content_type != "application/octet-stream" {
+                return Ok(Resp::json(
+                    400,
+                    &serde_json::json!({"error": "Invalid upload request."}),
+                ));
+            }
+            let root = std::path::Path::new(&cfg.photos.as_ref().expect("checked above").dir);
+            let filename = req
+                .query
+                .get("filename")
+                .map(String::as_str)
+                .unwrap_or("photo");
+            Ok(match photos::upload(conn, root, filename, &req.body, now) {
+                Ok(uploaded) => Resp::json(200, &uploaded),
+                Err(error) => photo_upload_error(error),
+            })
+        }
+        ("POST", ["photos", "i", id, "date"])
+            if user.can(Feature::Photos) && cfg.photos.is_some() =>
+        {
+            if req.requested_with != "1" {
+                return Ok(Resp::json(
+                    400,
+                    &serde_json::json!({"error": "Invalid request."}),
+                ));
+            }
+            let Ok(id) = id.parse::<i64>() else {
+                return Ok(Resp::json(
+                    404,
+                    &serde_json::json!({"error": "Photo not found."}),
+                ));
+            };
+            let month = req.form.get("month").map(String::as_str).unwrap_or("");
+            Ok(match photos::change_date(conn, id, month) {
+                Ok(true) => Resp::json(200, &serde_json::json!({"date": month})),
+                Ok(false) => Resp::json(404, &serde_json::json!({"error": "Photo not found."})),
+                Err(error) => photo_upload_error(error),
+            })
         }
         ("GET", ["photos", "t", tags @ ..])
             if user.can(Feature::Photos) && cfg.photos.is_some() && !tags.is_empty() =>
@@ -200,6 +252,21 @@ fn authed(
             Ok(Resp::redirect("/admin/users"))
         }
         _ => Ok(Resp::html(404, pages::not_found())),
+    }
+}
+
+fn photo_upload_error(error: photos::UploadError) -> Resp {
+    match error {
+        photos::UploadError::Invalid(message) => {
+            Resp::json(400, &serde_json::json!({"error": message}))
+        }
+        photos::UploadError::Failed(message) => {
+            log::error(&format!("photo upload: {message}"));
+            Resp::json(
+                500,
+                &serde_json::json!({"error": "Could not save the photo. Please try again."}),
+            )
+        }
     }
 }
 
@@ -653,6 +720,52 @@ mod tests {
             Req::test("GET", &format!("/photos/i/{id}/thumb"), "")
         )
         .starts_with(b"Status: 404\r\n"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn photo_upload_and_date_require_access_and_same_origin_header() {
+        let root =
+            std::env::temp_dir().join(format!("photo-upload-routes-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let conn = db::open_memory();
+        let mut config = cfg();
+        config.photos = Some(crate::config::Photos {
+            dir: root.to_str().unwrap().into(),
+        });
+        let call = |u: &User, req: &Req| {
+            let segs: Vec<_> = req.path.split('/').filter(|s| !s.is_empty()).collect();
+            let resp = authed(&conn, &config, req, &segs, u, "tok", 1_793_831_400).unwrap();
+            let mut out = Vec::new();
+            resp.write_to(&mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let granted = user(vec![Feature::Photos]);
+        let denied = user(vec![]);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let mut req = Req::test("POST", "/photos/upload", "");
+        req.body = bytes.into_inner();
+        req.content_type = "application/octet-stream".into();
+        req.requested_with = "1".into();
+        assert!(call(&denied, &req).starts_with("Status: 404"));
+        req.requested_with.clear();
+        assert!(call(&granted, &req).starts_with("Status: 400"));
+        req.requested_with = "1".into();
+        req.body_error = Some(413);
+        assert!(call(&granted, &req).contains("Photo exceeds 25 MB"));
+        req.body_error = None;
+        let response = call(&granted, &req);
+        assert!(response.starts_with("Status: 200"));
+        assert!(response.contains("\"duplicate\":false"));
+        assert!(call(&granted, &req).contains("\"duplicate\":true"));
+        let mut date = Req::test("POST", "/photos/i/1/date", "month=2022-03");
+        assert!(call(&granted, &date).starts_with("Status: 400"));
+        date.requested_with = "1".into();
+        assert!(call(&denied, &date).starts_with("Status: 404"));
+        assert!(call(&granted, &date).contains("\"date\":\"2022-03\""));
         std::fs::remove_dir_all(root).unwrap();
     }
 

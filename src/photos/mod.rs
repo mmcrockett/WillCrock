@@ -8,7 +8,9 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 mod images;
+mod upload;
 pub use images::{image_file, ImageKind};
+pub use upload::{change_date, upload, UploadError};
 
 const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "heic", "webp"];
 
@@ -354,10 +356,13 @@ pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
 }
 
 pub fn scan(conn: &mut Connection, root: &Path, now: i64) -> Result<ScanReport, String> {
+    let db_err = |e: rusqlite::Error| e.to_string();
+    // Keep uploads from entering the database after the filesystem snapshot.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(db_err)?;
     let mut files = Vec::new();
     walk(root, root, &mut files)?;
-    let db_err = |e: rusqlite::Error| e.to_string();
-    let tx = conn.transaction().map_err(db_err)?;
     let mut report = ScanReport::default();
     let mut seen = HashSet::new();
     for f in &files {

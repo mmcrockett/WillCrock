@@ -2,12 +2,27 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 
 const MAX_BODY: u64 = 64 * 1024;
+pub const MAX_PHOTO_BODY: u64 = 25 * 1024 * 1024;
+
+fn read_body(reader: impl Read, limit: u64) -> (Vec<u8>, Option<u16>) {
+    let mut body = Vec::new();
+    let error = match reader.take(limit + 1).read_to_end(&mut body) {
+        Err(_) => Some(400),
+        Ok(_) if body.len() as u64 > limit => Some(413),
+        Ok(_) => None,
+    };
+    (body, error)
+}
 
 pub struct Req {
     pub method: String,
     pub path: String,
     pub query: HashMap<String, String>,
     pub form: HashMap<String, String>,
+    pub body: Vec<u8>,
+    pub body_error: Option<u16>,
+    pub content_type: String,
+    pub requested_with: String,
     cookies: String,
 }
 
@@ -17,13 +32,23 @@ impl Req {
         let uri = req.param("REQUEST_URI").unwrap_or_default();
         let (path, uri_query) = split_uri(&uri);
         let query = req.param("QUERY_STRING").unwrap_or(uri_query);
-        let mut body = Vec::new();
-        let _ = req.stdin().take(MAX_BODY).read_to_end(&mut body);
+        let is_upload = method == "POST" && path == "/photos/upload";
+        let limit = if is_upload { MAX_PHOTO_BODY } else { MAX_BODY };
+        let (body, body_error) = read_body(req.stdin(), limit);
+        let form = if is_upload || body_error.is_some() {
+            HashMap::new()
+        } else {
+            parse_form(&String::from_utf8_lossy(&body))
+        };
         Req {
             method,
             path,
             query: parse_form(&query),
-            form: parse_form(&String::from_utf8_lossy(&body)),
+            form,
+            body: if is_upload { body } else { Vec::new() },
+            body_error,
+            content_type: req.param("CONTENT_TYPE").unwrap_or_default(),
+            requested_with: req.param("HTTP_X_WILLCROCK_REQUEST").unwrap_or_default(),
             cookies: req.param("HTTP_COOKIE").unwrap_or_default(),
         }
     }
@@ -35,6 +60,10 @@ impl Req {
             path: path.to_string(),
             query: HashMap::new(),
             form: parse_form(form),
+            body: Vec::new(),
+            body_error: None,
+            content_type: String::new(),
+            requested_with: String::new(),
             cookies: String::new(),
         }
     }
@@ -59,6 +88,21 @@ enum Body {
 }
 
 impl Resp {
+    pub fn json(status: u16, body: &impl serde::Serialize) -> Resp {
+        Resp {
+            status,
+            headers: vec![
+                (
+                    "Content-Type".into(),
+                    "application/json; charset=utf-8".into(),
+                ),
+                ("Cache-Control".into(), "no-store".into()),
+                ("X-Content-Type-Options".into(), "nosniff".into()),
+            ],
+            body: Body::Text(serde_json::to_string(body).expect("serializing response")),
+        }
+    }
+
     pub fn html(status: u16, body: String) -> Resp {
         Resp {
             status,
@@ -179,6 +223,12 @@ mod tests {
     }
 
     #[test]
+    fn body_limit_reports_truncation() {
+        assert_eq!(read_body(&b"abc"[..], 3), (b"abc".to_vec(), None));
+        assert_eq!(read_body(&b"abcd"[..], 3).1, Some(413));
+    }
+
+    #[test]
     fn encode_round_trip() {
         let s = "a+b@c.com & more/%";
         assert_eq!(urldecode(&urlencode(s)), s);
@@ -200,6 +250,10 @@ mod tests {
             path: "/".into(),
             query: HashMap::new(),
             form: HashMap::new(),
+            body: Vec::new(),
+            body_error: None,
+            content_type: String::new(),
+            requested_with: String::new(),
             cookies: "a=1; session=tok; b=2".into(),
         };
         assert_eq!(r.cookie("session"), Some("tok"));
