@@ -88,6 +88,11 @@ fn add_tag(tx: &rusqlite::Transaction, photo_id: i64, name: &str) -> rusqlite::R
     Ok(())
 }
 
+fn add_date_tags(tx: &rusqlite::Transaction, photo_id: i64, date: &str) -> rusqlite::Result<()> {
+    add_tag(tx, photo_id, &date[..4])?;
+    add_tag(tx, photo_id, &date[..7])
+}
+
 const LIVE_WITH_ALL_TAGS: &str = "SELECT p.id FROM photos p WHERE p.missing_at IS NULL AND \
      (SELECT COUNT(*) FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
       WHERE pt.photo_id = p.id AND t.name IN ({in})) = {n}";
@@ -409,8 +414,7 @@ pub fn scan(conn: &mut Connection, root: &Path, now: i64) -> Result<ScanReport, 
                 .map_err(db_err)?;
                 let id = tx.last_insert_rowid();
                 if let Some(taken_on) = taken_on_from_album(album_of(&f.rel)) {
-                    add_tag(&tx, id, &taken_on[..4]).map_err(db_err)?;
-                    add_tag(&tx, id, &taken_on[..7]).map_err(db_err)?;
+                    add_date_tags(&tx, id, &taken_on).map_err(db_err)?;
                 }
                 report.added += 1;
             }

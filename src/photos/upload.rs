@@ -1,4 +1,4 @@
-use super::add_tag;
+use super::add_date_tags;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -240,8 +240,7 @@ pub fn upload(
                 params![rel, bytes.len() as i64, mtime, hash, date, now],
             )?;
             let id = tx.last_insert_rowid();
-            add_tag(&tx, id, &date[..4])?;
-            add_tag(&tx, id, &date[..7])?;
+            add_date_tags(&tx, id, &date)?;
             tx.commit()?;
             Ok(id)
         })();
@@ -294,8 +293,7 @@ pub fn change_date(conn: &Connection, id: i64, month: &str) -> Result<bool, Uplo
         "UPDATE photos SET taken_on = ?1 WHERE id = ?2",
         params![month, id],
     )?;
-    add_tag(&tx, id, &month[..4])?;
-    add_tag(&tx, id, month)?;
+    add_date_tags(&tx, id, month)?;
     tx.commit()?;
     Ok(true)
 }
