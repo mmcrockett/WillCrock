@@ -15,3 +15,5 @@ CI runs the same checks on every push.
 `bin/photos-sync --login user@host --local-dir DIR` syncs DIR (e.g. `~/willcrock.com/photos`) with the server (no deletes either way) and tells the server which files the Mac has. With no options it prints usage.
 
 On the server, `willcrock.fcgi photos scan` indexes the folder and `willcrock.fcgi photos unsynced` lists files not yet pulled to the Mac (also shown on the Photos page).
+
+`/photos` remains the years/tags landing page. Year/tag pages show thumbnail galleries with a larger viewer and original downloads, all requiring Photos access. JPEG previews are generated on demand and cached under `[photos].dir/.gallery-v1/`, outside the public web root. The cache is disposable and excluded by the sync helper. HEIC photos currently offer an original download instead of a browser preview; GIF previews show the first frame.

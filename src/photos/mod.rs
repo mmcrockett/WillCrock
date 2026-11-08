@@ -7,6 +7,9 @@ use std::io::Read;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+mod images;
+pub use images::{image_file, ImageKind};
+
 const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "heic", "webp"];
 
 #[derive(Debug, Default, PartialEq)]
@@ -34,11 +37,26 @@ pub struct Summary {
 pub struct TagView {
     pub tags: Vec<String>,
     pub subtags: Vec<TagCount>,
-    pub photos: Vec<String>,
+    pub photos: Vec<Photo>,
     pub total: i64,
+    pub page: i64,
 }
 
-pub const TAG_VIEW_LIMIT: usize = 500;
+#[derive(Debug, PartialEq)]
+pub struct Photo {
+    pub id: i64,
+    pub path: String,
+}
+
+impl Photo {
+    pub fn can_preview(&self) -> bool {
+        !Path::new(&self.path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("heic"))
+    }
+}
+
+pub const TAG_VIEW_LIMIT: i64 = 60;
 
 pub fn normalize_tag(raw: &str) -> Option<String> {
     let t = raw.trim().to_lowercase();
@@ -77,7 +95,7 @@ fn live_with_all_tags(tags: &[String]) -> String {
         .replace("{n}", &tags.len().to_string())
 }
 
-pub fn tag_view(conn: &Connection, tags: &[String]) -> rusqlite::Result<TagView> {
+pub fn tag_view(conn: &Connection, tags: &[String], page: i64) -> rusqlite::Result<TagView> {
     let ids = live_with_all_tags(tags);
     let args = || rusqlite::params_from_iter(tags.iter());
     let marks = vec!["?"; tags.len()].join(",");
@@ -97,20 +115,29 @@ pub fn tag_view(conn: &Connection, tags: &[String]) -> rusqlite::Result<TagView>
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let total = conn.query_row(&format!("SELECT COUNT(*) FROM ({ids})"), args(), |r| {
+    let total: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM ({ids})"), args(), |r| {
         r.get(0)
     })?;
+    let page = page.clamp(1, ((total - 1) / TAG_VIEW_LIMIT + 1).max(1));
+    let offset = (page - 1) * TAG_VIEW_LIMIT;
     let mut stmt = conn.prepare(&format!(
-        "SELECT path FROM photos WHERE id IN ({ids}) ORDER BY path LIMIT {TAG_VIEW_LIMIT}"
+        "SELECT id, path FROM photos WHERE id IN ({ids}) ORDER BY path \
+         LIMIT {TAG_VIEW_LIMIT} OFFSET {offset}"
     ))?;
     let photos = stmt
-        .query_map(args(), |r| r.get(0))?
+        .query_map(args(), |r| {
+            Ok(Photo {
+                id: r.get(0)?,
+                path: r.get(1)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(TagView {
         tags: tags.to_vec(),
         subtags,
         photos,
         total,
+        page,
     })
 }
 
@@ -431,7 +458,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    fn temp_dir(tag: &str) -> PathBuf {
+    pub(super) fn temp_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("willcrock-photos-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -491,16 +518,47 @@ mod tests {
         let root = library("tagview");
         let mut conn = db::open_memory();
         scan(&mut conn, &root, 100).unwrap();
-        let year = tag_view(&conn, &["2018".to_string()]).unwrap();
+        let year = tag_view(&conn, &["2018".to_string()], 1).unwrap();
         assert_eq!(year.total, 2);
         let months: Vec<_> = year.subtags.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(months, vec!["2018-03", "2018-09"]);
-        let month = tag_view(&conn, &["2018".to_string(), "2018-03".to_string()]).unwrap();
-        assert_eq!(month.photos, vec!["2018/20180315_RedRiverTrip/IMG_1.JPG"]);
+        let month = tag_view(&conn, &["2018".to_string(), "2018-03".to_string()], 1).unwrap();
+        assert_eq!(month.photos[0].path, "2018/20180315_RedRiverTrip/IMG_1.JPG");
         assert!(month.subtags.is_empty());
-        let none = tag_view(&conn, &["nope".to_string()]).unwrap();
+        let none = tag_view(&conn, &["nope".to_string()], 1).unwrap();
         assert_eq!(none.total, 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gallery_pages_cover_all_matching_photos_without_overlap() {
+        let mut conn = db::open_memory();
+        let tx = conn.transaction().unwrap();
+        for i in 0..65 {
+            tx.execute(
+                "INSERT INTO photos (path, album, size, mtime, sha256, created_at) \
+                 VALUES (?1, '', 1, 0, 'hash', 0)",
+                [format!("{i:03}.jpg")],
+            )
+            .unwrap();
+            add_tag(&tx, tx.last_insert_rowid(), "family").unwrap();
+        }
+        tx.execute(
+            "UPDATE photos SET missing_at = 1 WHERE path = '064.jpg'",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let tags = ["family".to_string()];
+        let first = tag_view(&conn, &tags, 1).unwrap();
+        let last = tag_view(&conn, &tags, i64::MAX).unwrap();
+        assert_eq!(first.total, 64);
+        assert_eq!(first.photos.len(), 60);
+        assert_eq!(last.page, 2);
+        assert_eq!(last.photos.len(), 4);
+        assert_eq!(first.photos[59].path, "059.jpg");
+        assert_eq!(last.photos[0].path, "060.jpg");
+        assert_eq!(tag_view(&conn, &["nope".into()], 100).unwrap().page, 1);
     }
 
     #[test]

@@ -50,7 +50,12 @@ impl Req {
 pub struct Resp {
     status: u16,
     headers: Vec<(String, String)>,
-    body: String,
+    body: Body,
+}
+
+enum Body {
+    Text(String),
+    File(std::fs::File),
 }
 
 impl Resp {
@@ -62,7 +67,7 @@ impl Resp {
                 ("Cache-Control".into(), "no-store".into()),
                 ("X-Content-Type-Options".into(), "nosniff".into()),
             ],
-            body,
+            body: Body::Text(body),
         }
     }
 
@@ -70,8 +75,22 @@ impl Resp {
         Resp {
             status: 303,
             headers: vec![("Location".into(), location.into())],
-            body: String::new(),
+            body: Body::Text(String::new()),
         }
+    }
+
+    pub fn file(file: std::fs::File, content_type: &str) -> std::io::Result<Resp> {
+        let length = file.metadata()?.len();
+        Ok(Resp {
+            status: 200,
+            headers: vec![
+                ("Content-Type".into(), content_type.into()),
+                ("Content-Length".into(), length.to_string()),
+                ("Cache-Control".into(), "private, no-store".into()),
+                ("X-Content-Type-Options".into(), "nosniff".into()),
+            ],
+            body: Body::File(file),
+        })
     }
 
     pub fn header(mut self, name: &str, value: String) -> Resp {
@@ -84,7 +103,11 @@ impl Resp {
         for (k, v) in &self.headers {
             write!(out, "{k}: {v}\r\n")?;
         }
-        write!(out, "\r\n{}", self.body)
+        write!(out, "\r\n")?;
+        match &self.body {
+            Body::Text(body) => out.write_all(body.as_bytes()),
+            Body::File(file) => std::io::copy(&mut &*file, out).map(|_| ()),
+        }
     }
 }
 
@@ -181,5 +204,26 @@ mod tests {
         };
         assert_eq!(r.cookie("session"), Some("tok"));
         assert_eq!(r.cookie("missing"), None);
+    }
+
+    #[test]
+    fn writes_binary_response_without_utf8_conversion() {
+        let path =
+            std::env::temp_dir().join(format!("willcrock-response-{}", rand::random::<u64>()));
+        let bytes = [0xff, 0xd8, 0, 0x80, 0xff];
+        std::fs::write(&path, bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut out = Vec::new();
+        Resp::file(file, "image/jpeg")
+            .unwrap()
+            .write_to(&mut out)
+            .unwrap();
+        let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let headers = std::str::from_utf8(&out[..split]).unwrap();
+        assert!(headers.contains("Content-Type: image/jpeg"));
+        assert!(headers.contains("Content-Length: 5"));
+        assert!(headers.contains("Cache-Control: private, no-store"));
+        assert_eq!(&out[split + 4..], &bytes);
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 fastcgi = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 jiff = { version = "0.2.38", features = ["tzdb-bundle-always"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "rustls-tls"] }
 rand = "0.8"
