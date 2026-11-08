@@ -1013,27 +1013,68 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
             tag_links(&view.subtags, &path)
         )
     };
-    let rows: String = view
+    let tiles: String = view
         .photos
         .iter()
-        .map(|p| format!("<tr><td>{}</td></tr>", esc(p)))
+        .map(|p| {
+            let filename = p.path.rsplit('/').next().unwrap_or(&p.path);
+            if p.can_preview() {
+                format!(
+                    "<a class=\"photo-tile\" href=\"/photos/i/{id}/preview\" data-photo \
+                     data-original=\"/photos/i/{id}/original\" data-caption=\"{caption}\">\
+                     <span class=\"photo-thumb\"><img src=\"/photos/i/{id}/thumb\" \
+                     alt=\"{caption}\" loading=\"lazy\" decoding=\"async\">\
+                     <span class=\"photo-load-error\" hidden>Preview unavailable</span></span>\
+                     <span class=\"photo-caption\">{caption}</span></a>",
+                    id = p.id,
+                    caption = esc(filename),
+                )
+            } else {
+                format!(
+                    "<a class=\"photo-tile\" href=\"/photos/i/{id}/original\">\
+                     <span class=\"photo-thumb photo-unsupported\">HEIC photo<br>Download to view</span>\
+                     <span class=\"photo-caption\">{caption}</span></a>",
+                    id = p.id,
+                    caption = esc(filename),
+                )
+            }
+        })
         .collect();
-    let more = if view.total as usize > view.photos.len() {
-        format!(
-            "<p class=\"text-body-secondary small\">Showing first {} of {}.</p>",
-            view.photos.len(),
-            view.total
-        )
-    } else {
-        String::new()
-    };
+    let mut pagination = String::new();
+    let base = format!("/photos/t/{}", path.trim_end_matches('/'));
+    if view.page > 1 {
+        pagination.push_str(&format!(
+            "<a class=\"btn btn-outline-secondary\" href=\"{base}?page={}\">Previous</a>",
+            view.page - 1
+        ));
+    }
+    if view.page * photos::TAG_VIEW_LIMIT < view.total {
+        pagination.push_str(&format!(
+            "<a class=\"btn btn-outline-secondary\" href=\"{base}?page={}\">Next</a>",
+            view.page + 1
+        ));
+    }
     let list = if view.photos.is_empty() {
         "<div class=\"card shadow-sm\"><div class=\"card-body\">No photos.</div></div>".to_string()
     } else {
         format!(
-            "<div class=\"card shadow-sm\"><div class=\"table-responsive\">\
-             <table class=\"table table-hover align-middle mb-0\"><tbody>{rows}</tbody></table>\
-             </div></div>{more}"
+            "<div class=\"photo-grid\">{tiles}</div>\
+             <nav class=\"d-flex gap-2 my-3\" aria-label=\"Photo pages\">{pagination}</nav>\
+             <p class=\"text-body-secondary small\">Showing {}-{} of {}.</p>\
+             <dialog class=\"photo-viewer\" aria-label=\"Photo viewer\">\
+             <div class=\"photo-viewer-toolbar\">\
+             <button type=\"button\" class=\"btn btn-light\" data-photo-prev>Previous</button>\
+             <button type=\"button\" class=\"btn btn-light\" data-photo-next>Next</button>\
+             <a class=\"btn btn-light\" data-photo-download>Download original</a>\
+             <button type=\"button\" class=\"btn btn-light\" data-photo-close>Close</button></div>\
+             <p class=\"photo-viewer-caption\" aria-live=\"polite\"></p>\
+             <p class=\"photo-viewer-error\" role=\"status\" hidden>Could not load this photo. Try downloading the original.</p>\
+             <img class=\"photo-viewer-image\" alt=\"\">\
+             </dialog><script src=\"{}\" defer></script>",
+            (view.page - 1) * photos::TAG_VIEW_LIMIT + 1,
+            (view.page - 1) * photos::TAG_VIEW_LIMIT + view.photos.len() as i64,
+            view.total,
+            asset("/static/photos.js"),
         )
     };
     app_page(
@@ -1636,12 +1677,38 @@ mod tests {
                 name: "2018-03".into(),
                 count: 2,
             }],
-            photos: vec!["2018/<x>.jpg".into()],
+            photos: vec![photos::Photo {
+                id: 7,
+                path: "2018/<x>.jpg".into(),
+            }],
             total: 3,
+            page: 1,
         };
         let html = photo_tag_view(&u, Features::default(), &view);
         assert!(html.contains("href=\"/photos/t/2018/2018-03\""));
-        assert!(html.contains("2018/&lt;x&gt;.jpg"));
-        assert!(html.contains("Showing first 1 of 3"));
+        assert!(html.contains("&lt;x&gt;.jpg"));
+        assert!(html.contains("src=\"/photos/i/7/thumb\""));
+        assert!(html.contains("href=\"/photos/i/7/preview\""));
+        assert!(html.contains("Showing 1-1 of 3"));
+    }
+
+    #[test]
+    fn photo_gallery_paginates_and_marks_unsupported_images() {
+        let view = photos::TagView {
+            tags: vec!["a & b".into()],
+            subtags: vec![],
+            photos: vec![photos::Photo {
+                id: 8,
+                path: "phone.HEIC".into(),
+            }],
+            total: 130,
+            page: 2,
+        };
+        let html = photo_tag_view(&user(1, "mike", true), Features::default(), &view);
+        assert!(html.contains("/photos/t/a%20%26%20b?page=1"));
+        assert!(html.contains("/photos/t/a%20%26%20b?page=3"));
+        assert!(html.contains("href=\"/photos/i/8/original\""));
+        assert!(html.contains("Download to view"));
+        assert!(!html.contains("/photos/i/8/thumb"));
     }
 }

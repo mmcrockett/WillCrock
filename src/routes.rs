@@ -2,7 +2,7 @@ use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
 use crate::{log, mail, pages, photos, pickle, sms, trips};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 fn features(cfg: &Config) -> pages::Features {
     pages::Features {
@@ -95,11 +95,23 @@ fn authed(
                     None => return Ok(Resp::html(404, pages::not_found())),
                 }
             }
-            let view = photos::tag_view(conn, &names)?;
+            let page = match req.query.get("page") {
+                None => 1,
+                Some(raw) => match raw.parse::<i64>() {
+                    Ok(page) if page > 0 => page,
+                    _ => return Ok(Resp::html(400, pages::not_found())),
+                },
+            };
+            let view = photos::tag_view(conn, &names, page)?;
             Ok(Resp::html(
                 200,
                 pages::photo_tag_view(user, features(cfg), &view),
             ))
+        }
+        ("GET", ["photos", "i", id, kind @ ("thumb" | "preview" | "original")])
+            if user.can(Feature::Photos) && cfg.photos.is_some() =>
+        {
+            photo_image(conn, cfg, id, kind)
         }
         ("GET", [page @ "recipes"]) if Feature::parse(page).is_some_and(|f| user.can(f)) => {
             let feature = Feature::parse(page).expect("matched above");
@@ -156,6 +168,70 @@ fn authed(
         }
         _ => Ok(Resp::html(404, pages::not_found())),
     }
+}
+
+fn photo_image(conn: &Connection, cfg: &Config, id: &str, kind: &str) -> rusqlite::Result<Resp> {
+    let not_found = || Resp::html(404, pages::not_found());
+    let Ok(id) = id.parse::<i64>() else {
+        return Ok(not_found());
+    };
+    let photo = conn
+        .query_row(
+            "SELECT path, sha256 FROM photos WHERE id = ?1 AND missing_at IS NULL",
+            [id],
+            |r| {
+                Ok((
+                    photos::Photo {
+                        id,
+                        path: r.get(0)?,
+                    },
+                    r.get::<_, String>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (Some((photo, hash)), Some(config)) = (photo, cfg.photos.as_ref()) else {
+        return Ok(not_found());
+    };
+    let image_kind = match kind {
+        "thumb" => photos::ImageKind::Thumbnail,
+        "preview" => photos::ImageKind::Preview,
+        _ => photos::ImageKind::Original,
+    };
+    let result = photos::image_file(std::path::Path::new(&config.dir), &photo, &hash, image_kind)
+        .and_then(|file| {
+            file.map(|file| {
+                let content_type = if kind == "original" {
+                    "application/octet-stream"
+                } else {
+                    "image/jpeg"
+                };
+                Resp::file(file, content_type).map(|resp| {
+                    if kind == "original" {
+                        let filename = std::path::Path::new(&photo.path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("photo");
+                        resp.header(
+                            "Content-Disposition",
+                            format!("attachment; filename*=UTF-8''{}", urlencode(filename)),
+                        )
+                    } else {
+                        resp
+                    }
+                })
+            })
+            .transpose()
+            .map_err(|e| format!("photo {id} response: {e}"))
+        });
+    Ok(match result {
+        Ok(Some(resp)) => resp,
+        Ok(None) => not_found(),
+        Err(e) => {
+            log::error(&e);
+            Resp::html(500, pages::error())
+        }
+    })
 }
 
 fn admin_page(conn: &Connection, cfg: &Config, me: &User) -> rusqlite::Result<Resp> {
@@ -423,6 +499,75 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         let status = text["Status: ".len()..].split("\r\n").next().unwrap();
         (status.parse().unwrap(), text)
+    }
+
+    #[test]
+    fn photo_gallery_and_image_routes_enforce_access_and_serve_binary_files() {
+        let root = std::env::temp_dir().join(format!(
+            "willcrock-gallery-routes-{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(root.join("2026/20261108")).unwrap();
+        let path = root.join("2026/20261108/photo.png");
+        image::RgbImage::new(40, 20).save(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut conn = db::open_memory();
+        photos::scan(&mut conn, &root, 100).unwrap();
+        let id: i64 = conn
+            .query_row("SELECT id FROM photos", [], |r| r.get(0))
+            .unwrap();
+        let mut config = cfg();
+        config.photos = Some(crate::config::Photos {
+            dir: root.to_str().unwrap().into(),
+        });
+        let granted = user(vec![Feature::Photos]);
+        let denied = user(vec![]);
+        let call = |u: &User, req: Req| {
+            let segs: Vec<_> = req.path.split('/').filter(|s| !s.is_empty()).collect();
+            let resp = authed(&conn, &config, &req, &segs, u, "tok", 100).unwrap();
+            let mut out = Vec::new();
+            resp.write_to(&mut out).unwrap();
+            out
+        };
+        for kind in ["thumb", "preview", "original"] {
+            let url = format!("/photos/i/{id}/{kind}");
+            let response = call(&denied, Req::test("GET", &url, ""));
+            assert!(response.starts_with(b"Status: 404\r\n"));
+            let response = call(&granted, Req::test("GET", &url, ""));
+            assert!(response.starts_with(b"Status: 200\r\n"));
+            let split = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+            let body = &response[split + 4..];
+            if kind == "original" {
+                assert_eq!(body, original);
+                assert!(String::from_utf8_lossy(&response[..split])
+                    .contains("attachment; filename*=UTF-8''photo.png"));
+            } else {
+                assert!(image::load_from_memory(body).is_ok());
+            }
+            let mut out = Vec::new();
+            handle(&conn, &config, &Req::test("GET", &url, ""), 100)
+                .write_to(&mut out)
+                .unwrap();
+            assert!(String::from_utf8(out).unwrap().contains("Location: /login"));
+        }
+        let gallery = call(&granted, Req::test("GET", "/photos/t/2026", ""));
+        let gallery = String::from_utf8(gallery).unwrap();
+        assert!(gallery.contains("class=\"photo-grid\""));
+        assert!(gallery.contains(&format!("/photos/i/{id}/thumb")));
+        let landing = String::from_utf8(call(&granted, Req::test("GET", "/photos", ""))).unwrap();
+        assert!(landing.contains("href=\"/photos/t/2026\""));
+        assert!(!landing.contains("class=\"photo-grid\""));
+        let mut bad_page = Req::test("GET", "/photos/t/2026", "");
+        bad_page.query.insert("page".into(), "0".into());
+        assert!(call(&granted, bad_page).starts_with(b"Status: 400\r\n"));
+        conn.execute("UPDATE photos SET missing_at = 1", [])
+            .unwrap();
+        assert!(call(
+            &granted,
+            Req::test("GET", &format!("/photos/i/{id}/thumb"), "")
+        )
+        .starts_with(b"Status: 404\r\n"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
