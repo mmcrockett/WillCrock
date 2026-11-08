@@ -355,6 +355,7 @@ body {
 
 .photo-card {
   min-width: 0;
+  position: relative;
 }
 
 .photo-tile {
@@ -367,17 +368,41 @@ body {
   text-decoration: none;
 }
 
-.photo-tags {
+.photo-tag-button {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
   display: grid;
-  gap: 0.35rem;
-  padding: 0.4rem;
-  border-radius: 0 0 0.5rem 0.5rem;
-  background: #fff;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  color: #171717;
+  font-size: 1.4rem;
+  line-height: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
-.photo-tags button {
-  justify-self: end;
+.photo-tag-picker {
+  width: min(94vw, 32rem);
+  max-width: 94vw;
+  padding: 1.25rem;
+  border: 0;
+  border-radius: 0.5rem;
+}
+
+.photo-tag-picker::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.photo-tag-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+  gap: 0.5rem;
+  max-height: 50vh;
+  overflow: auto;
 }
 
 .photo-thumb {

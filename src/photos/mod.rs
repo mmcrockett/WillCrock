@@ -37,6 +37,7 @@ pub struct Summary {
 pub struct TagView {
     pub tags: Vec<String>,
     pub subtags: Vec<TagCount>,
+    pub known_tags: Vec<String>,
     pub photos: Vec<Photo>,
     pub total: i64,
     pub page: i64,
@@ -147,9 +148,22 @@ pub fn tag_view(conn: &Connection, tags: &[String], page: i64) -> rusqlite::Resu
             .filter(|tag| !is_year_tag(tag) && !is_month_tag(tag))
             .collect();
     }
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT t.name FROM tags t \
+         JOIN photo_tags pt ON pt.tag_id = t.id \
+         JOIN photos p ON p.id = pt.photo_id \
+         WHERE p.missing_at IS NULL ORDER BY t.name",
+    )?;
+    let known_tags = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|tag| !is_year_tag(tag) && !is_month_tag(tag))
+        .collect();
     Ok(TagView {
         tags: tags.to_vec(),
         subtags,
+        known_tags,
         photos,
         total,
         page,

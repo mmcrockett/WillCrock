@@ -1018,21 +1018,36 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
             tag_links(&view.subtags, &path)
         )
     };
+    let known_tag_options = view
+        .known_tags
+        .iter()
+        .map(|tag| {
+            format!(
+                "<label><input class=\"form-check-input me-1\" type=\"checkbox\" \
+                 name=\"known_tag\" value=\"{}\">{}</label>",
+                esc(tag),
+                esc(tag)
+            )
+        })
+        .collect::<String>();
+    let known_tag_options = if known_tag_options.is_empty() {
+        "<p class=\"small text-body-secondary\">No existing tags yet.</p>".to_string()
+    } else {
+        known_tag_options
+    };
     let tiles: String = view
         .photos
         .iter()
         .map(|p| {
             let filename = p.path.rsplit('/').next().unwrap_or(&p.path);
-            let tag_form = format!(
-                "<form class=\"photo-tags\" method=\"post\" action=\"/photos/i/{}/tags\">\
-                 <input type=\"hidden\" name=\"return_to\" value=\"{}\">\
-                 <input class=\"form-control form-control-sm\" name=\"tags\" \
-                 value=\"{}\" placeholder=\"People or tags\" aria-label=\"Photo tags\">\
-                 <button class=\"btn btn-sm btn-outline-secondary\" type=\"submit\">Save tags</button>\
-                 </form>",
+            let tag_button = format!(
+                "<button class=\"photo-tag-button\" type=\"button\" data-tag-picker \
+                 data-action=\"/photos/i/{}/tags\" data-return-to=\"{}\" data-tags=\"{}\" \
+                 aria-label=\"Edit tags for {}\" title=\"Edit tags\">+</button>",
                 p.id,
                 esc(&return_to),
                 esc(&p.tags.join(", ")),
+                esc(filename),
             );
             if p.can_preview() {
                 format!(
@@ -1041,19 +1056,19 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
                      <span class=\"photo-thumb\"><img src=\"/photos/i/{id}/thumb\" \
                      alt=\"{caption}\" loading=\"lazy\" decoding=\"async\">\
                      <span class=\"photo-load-error\" hidden>Preview unavailable</span></span>\
-                     <span class=\"photo-caption\">{caption}</span></a>{tag_form}</div>",
+                     <span class=\"photo-caption\">{caption}</span></a>{tag_button}</div>",
                     id = p.id,
                     caption = esc(filename),
-                    tag_form = tag_form,
+                    tag_button = tag_button,
                 )
             } else {
                 format!(
                     "<div class=\"photo-card\"><a class=\"photo-tile\" href=\"/photos/i/{id}/original\">\
                      <span class=\"photo-thumb photo-unsupported\">HEIC photo<br>Download to view</span>\
-                     <span class=\"photo-caption\">{caption}</span></a>{tag_form}</div>",
+                     <span class=\"photo-caption\">{caption}</span></a>{tag_button}</div>",
                     id = p.id,
                     caption = esc(filename),
-                    tag_form = tag_form,
+                    tag_button = tag_button,
                 )
             }
         })
@@ -1088,10 +1103,25 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
              <p class=\"photo-viewer-caption\" aria-live=\"polite\"></p>\
              <p class=\"photo-viewer-error\" role=\"status\" hidden>Could not load this photo. Try downloading the original.</p>\
              <img class=\"photo-viewer-image\" alt=\"\">\
-             </dialog><script src=\"{}\" defer></script>",
+             </dialog>\
+             <dialog class=\"photo-tag-picker\" aria-labelledby=\"photo-tag-title\">\
+             <form method=\"post\" data-tag-form>\
+             <h2 class=\"h5\" id=\"photo-tag-title\">Edit photo tags</h2>\
+             <fieldset><legend class=\"h6\">Known tags</legend>\
+             <div class=\"photo-tag-options\">{}</div></fieldset>\
+             <label class=\"form-label mt-3\" for=\"new-photo-tag\">Add a new tag</label>\
+             <input class=\"form-control\" id=\"new-photo-tag\" name=\"new_tag\" maxlength=\"50\" \
+             placeholder=\"New tag\">\
+             <input type=\"hidden\" name=\"tags\">\
+             <input type=\"hidden\" name=\"return_to\">\
+             <div class=\"d-flex justify-content-end gap-2 mt-3\">\
+             <button class=\"btn btn-outline-secondary\" type=\"button\" data-tag-close>Cancel</button>\
+             <button class=\"btn btn-primary\" type=\"submit\">Save tags</button></div>\
+             </form></dialog><script src=\"{}\" defer></script>",
             (view.page - 1) * photos::TAG_VIEW_LIMIT + 1,
             (view.page - 1) * photos::TAG_VIEW_LIMIT + view.photos.len() as i64,
             view.total,
+            known_tag_options,
             asset("/static/photos.js"),
         )
     };
@@ -1709,6 +1739,7 @@ mod tests {
                 name: "2018-03".into(),
                 count: 2,
             }],
+            known_tags: vec!["mike".into()],
             photos: vec![photos::Photo {
                 id: 7,
                 path: "2018/<x>.jpg".into(),
@@ -1722,8 +1753,11 @@ mod tests {
         assert!(html.contains("&lt;x&gt;.jpg"));
         assert!(html.contains("src=\"/photos/i/7/thumb\""));
         assert!(html.contains("href=\"/photos/i/7/preview\""));
-        assert!(html.contains("name=\"tags\" value=\"mike\""));
-        assert!(html.contains("action=\"/photos/i/7/tags\""));
+        assert!(html.contains("data-action=\"/photos/i/7/tags\""));
+        assert!(html.contains("data-tags=\"mike\""));
+        assert!(html.contains("aria-label=\"Edit tags for &lt;x&gt;.jpg\""));
+        assert!(html.contains("name=\"known_tag\" value=\"mike\""));
+        assert!(html.contains("name=\"new_tag\""));
         assert!(html.contains("Showing 1-1 of 3"));
     }
 
@@ -1732,6 +1766,7 @@ mod tests {
         let view = photos::TagView {
             tags: vec!["a & b".into()],
             subtags: vec![],
+            known_tags: vec!["alice".into()],
             photos: vec![photos::Photo {
                 id: 8,
                 path: "phone.HEIC".into(),

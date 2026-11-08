@@ -620,7 +620,8 @@ mod tests {
         let people =
             String::from_utf8(call(&granted, Req::test("GET", "/photos/t/alice", ""))).unwrap();
         assert!(people.contains(&format!("/photos/i/{id}/thumb")));
-        assert!(people.contains("value=\"alice, bob\""));
+        assert!(people.contains("data-tags=\"alice, bob\""));
+        assert!(people.contains("name=\"known_tag\" value=\"alice\""));
         let year =
             String::from_utf8(call(&granted, Req::test("GET", "/photos/t/2026", ""))).unwrap();
         assert!(year.contains("href=\"/photos/t/2026/alice\""));

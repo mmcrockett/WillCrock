@@ -1,4 +1,35 @@
 (() => {
+  const tagPicker = document.querySelector(".photo-tag-picker");
+  if (tagPicker) {
+    const form = tagPicker.querySelector("[data-tag-form]");
+    const tagsInput = form.querySelector("[name=tags]");
+    const returnToInput = form.querySelector("[name=return_to]");
+    const newTagInput = form.querySelector("[name=new_tag]");
+    const options = Array.from(form.querySelectorAll("[name=known_tag]"));
+    const buttons = Array.from(document.querySelectorAll("[data-tag-picker]"));
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        form.action = button.dataset.action;
+        returnToInput.value = button.dataset.returnTo;
+        const selected = new Set(button.dataset.tags.split(", ").filter(Boolean));
+        options.forEach((option) => { option.checked = selected.has(option.value); });
+        newTagInput.value = "";
+        tagPicker.showModal();
+      });
+    });
+
+    form.addEventListener("submit", () => {
+      const selected = options.filter((option) => option.checked).map((option) => option.value);
+      if (newTagInput.value.trim()) selected.push(newTagInput.value.trim());
+      tagsInput.value = selected.join(", ");
+    });
+    tagPicker.querySelector("[data-tag-close]").addEventListener("click", () => tagPicker.close());
+    tagPicker.addEventListener("click", (event) => {
+      if (event.target === tagPicker) tagPicker.close();
+    });
+  }
+
   const viewer = document.querySelector(".photo-viewer");
   if (!viewer) return;
   const tiles = Array.from(document.querySelectorAll("[data-photo]"));
