@@ -46,6 +46,7 @@ pub struct TagView {
 pub struct Photo {
     pub id: i64,
     pub path: String,
+    pub tags: Vec<String>,
 }
 
 impl Photo {
@@ -129,9 +130,23 @@ pub fn tag_view(conn: &Connection, tags: &[String], page: i64) -> rusqlite::Resu
             Ok(Photo {
                 id: r.get(0)?,
                 path: r.get(1)?,
+                tags: Vec::new(),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut tag_stmt = conn.prepare(
+        "SELECT t.name FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
+         WHERE pt.photo_id = ?1 ORDER BY t.name",
+    )?;
+    let mut photos = photos;
+    for photo in &mut photos {
+        photo.tags = tag_stmt
+            .query_map([photo.id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|tag| !is_year_tag(tag) && !is_month_tag(tag))
+            .collect();
+    }
     Ok(TagView {
         tags: tags.to_vec(),
         subtags,
@@ -139,6 +154,57 @@ pub fn tag_view(conn: &Connection, tags: &[String], page: i64) -> rusqlite::Resu
         total,
         page,
     })
+}
+
+pub fn parse_tags(raw: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for item in raw.split(',').filter(|item| !item.trim().is_empty()) {
+        let Some(name) = normalize_tag(item) else {
+            return Err("Tags cannot contain slashes.".into());
+        };
+        if name.chars().count() > 50 || is_year_tag(&name) || is_month_tag(&name) {
+            return Err(
+                "Tags must be at most 50 characters and cannot be year or month labels.".into(),
+            );
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+pub fn set_tags(conn: &Connection, photo_id: i64, names: &[String]) -> rusqlite::Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let Some(taken_on) = tx
+        .query_row(
+            "SELECT taken_on FROM photos WHERE id = ?1 AND missing_at IS NULL",
+            [photo_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let (year, month) = taken_on
+        .as_deref()
+        .map(|date| {
+            (
+                date.get(..4).unwrap_or("").to_string(),
+                date.get(..7).unwrap_or("").to_string(),
+            )
+        })
+        .unwrap_or_default();
+    tx.execute(
+        "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id NOT IN \
+         (SELECT id FROM tags WHERE name IN (?2, ?3))",
+        params![photo_id, year, month],
+    )?;
+    for name in names {
+        add_tag(&tx, photo_id, name)?;
+    }
+    tx.commit()?;
+    Ok(true)
 }
 
 pub fn run(args: &[String]) {

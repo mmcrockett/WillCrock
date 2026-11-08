@@ -94,6 +94,7 @@ mod tests {
         let photo = Photo {
             id: 1,
             path: "portrait.png".into(),
+            tags: Vec::new(),
         };
         let hash = super::super::hash(&source).unwrap();
         let read = |kind| {
@@ -126,6 +127,7 @@ mod tests {
             let photo = Photo {
                 id: 1,
                 path: path.into(),
+                tags: Vec::new(),
             };
             assert!(image_file(&root, &photo, &hash, ImageKind::Original)
                 .unwrap()
@@ -135,6 +137,7 @@ mod tests {
         let photo = Photo {
             id: 1,
             path: "escape.jpg".into(),
+            tags: Vec::new(),
         };
         assert!(image_file(&root, &photo, &hash, ImageKind::Original)
             .unwrap()
@@ -143,6 +146,7 @@ mod tests {
         let photo = Photo {
             id: 2,
             path: "phone.HEIC".into(),
+            tags: Vec::new(),
         };
         assert!(image_file(&root, &photo, &hash, ImageKind::Thumbnail)
             .unwrap()
@@ -169,6 +173,7 @@ mod tests {
         let photo = Photo {
             id: 1,
             path: "rotated.jpg".into(),
+            tags: Vec::new(),
         };
         let mut bytes = Vec::new();
         image_file(&root, &photo, &"a".repeat(64), ImageKind::Thumbnail)

@@ -113,6 +113,39 @@ fn authed(
         {
             photo_image(conn, cfg, id, kind)
         }
+        ("POST", ["photos", "i", id, "tags"])
+            if user.can(Feature::Photos) && cfg.photos.is_some() =>
+        {
+            let Ok(id) = id.parse::<i64>() else {
+                return Ok(Resp::html(404, pages::not_found()));
+            };
+            let raw = req.form.get("tags").map(String::as_str).unwrap_or("");
+            let names = match photos::parse_tags(raw) {
+                Ok(names) => names,
+                Err(message) => {
+                    return Ok(Resp::html(
+                        400,
+                        pages::photo_tags_error(user, features(cfg), &message),
+                    ))
+                }
+            };
+            if photos::set_tags(conn, id, &names)? {
+                let return_to = req
+                    .form
+                    .get("return_to")
+                    .filter(|path| {
+                        path.starts_with("/photos/t/")
+                            && path
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"/%?=&.-_~".contains(&b))
+                    })
+                    .map(String::as_str)
+                    .unwrap_or("/photos");
+                Ok(Resp::redirect(return_to))
+            } else {
+                Ok(Resp::html(404, pages::not_found()))
+            }
+        }
         ("GET", [page @ "recipes"]) if Feature::parse(page).is_some_and(|f| user.can(f)) => {
             let feature = Feature::parse(page).expect("matched above");
             Ok(Resp::html(
@@ -184,6 +217,7 @@ fn photo_image(conn: &Connection, cfg: &Config, id: &str, kind: &str) -> rusqlit
                     photos::Photo {
                         id,
                         path: r.get(0)?,
+                        tags: Vec::new(),
                     },
                     r.get::<_, String>(1)?,
                 ))
@@ -554,6 +588,57 @@ mod tests {
         let gallery = String::from_utf8(gallery).unwrap();
         assert!(gallery.contains("class=\"photo-grid\""));
         assert!(gallery.contains(&format!("/photos/i/{id}/thumb")));
+        assert!(call(
+            &denied,
+            Req::test("POST", &format!("/photos/i/{id}/tags"), "tags=alice")
+        )
+        .starts_with(b"Status: 404\r\n"));
+        let invalid = call(
+            &granted,
+            Req::test(
+                "POST",
+                &format!("/photos/i/{id}/tags"),
+                "tags=bad%2Ftag&return_to=%2Fphotos%2Ft%2F2026",
+            ),
+        );
+        assert!(invalid.starts_with(b"Status: 400\r\n"));
+        assert!(String::from_utf8(invalid)
+            .unwrap()
+            .contains("cannot contain slashes"));
+        let saved = call(
+            &granted,
+            Req::test(
+                "POST",
+                &format!("/photos/i/{id}/tags"),
+                "tags=Alice%2C+Bob&return_to=%2Fphotos%2Ft%2F2026",
+            ),
+        );
+        assert!(saved.starts_with(b"Status: 303\r\n"));
+        assert!(String::from_utf8(saved)
+            .unwrap()
+            .contains("Location: /photos/t/2026"));
+        let people =
+            String::from_utf8(call(&granted, Req::test("GET", "/photos/t/alice", ""))).unwrap();
+        assert!(people.contains(&format!("/photos/i/{id}/thumb")));
+        assert!(people.contains("value=\"alice, bob\""));
+        let year =
+            String::from_utf8(call(&granted, Req::test("GET", "/photos/t/2026", ""))).unwrap();
+        assert!(year.contains("href=\"/photos/t/2026/alice\""));
+        let cleared = call(
+            &granted,
+            Req::test("POST", &format!("/photos/i/{id}/tags"), "tags="),
+        );
+        assert!(cleared.starts_with(b"Status: 303\r\n"));
+        assert!(
+            String::from_utf8(call(&granted, Req::test("GET", "/photos/t/2026", "")))
+                .unwrap()
+                .contains("class=\"photo-grid\"")
+        );
+        assert!(
+            String::from_utf8(call(&granted, Req::test("GET", "/photos/t/alice", "")))
+                .unwrap()
+                .contains("No photos.")
+        );
         let landing = String::from_utf8(call(&granted, Req::test("GET", "/photos", ""))).unwrap();
         assert!(landing.contains("href=\"/photos/t/2026\""));
         assert!(!landing.contains("class=\"photo-grid\""));
