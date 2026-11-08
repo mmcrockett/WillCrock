@@ -353,13 +353,31 @@ body {
   gap: 1rem;
 }
 
+.photo-card {
+  min-width: 0;
+}
+
 .photo-tile {
+  display: block;
   min-width: 0;
   overflow: hidden;
   border-radius: 0.5rem;
   background: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
   text-decoration: none;
+}
+
+.photo-tags {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.4rem;
+  border-radius: 0 0 0.5rem 0.5rem;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+.photo-tags button {
+  justify-self: end;
 }
 
 .photo-thumb {

@@ -1005,6 +1005,11 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
         crumbs.push_str(&format!(" / <a href=\"/photos/t/{path}\">{}</a>", esc(t)));
         path.push('/');
     }
+    let return_to = format!(
+        "/photos/t/{}?page={}",
+        path.trim_end_matches('/'),
+        view.page
+    );
     let subtags = if view.subtags.is_empty() {
         String::new()
     } else {
@@ -1018,24 +1023,37 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
         .iter()
         .map(|p| {
             let filename = p.path.rsplit('/').next().unwrap_or(&p.path);
+            let tag_form = format!(
+                "<form class=\"photo-tags\" method=\"post\" action=\"/photos/i/{}/tags\">\
+                 <input type=\"hidden\" name=\"return_to\" value=\"{}\">\
+                 <input class=\"form-control form-control-sm\" name=\"tags\" \
+                 value=\"{}\" placeholder=\"People or tags\" aria-label=\"Photo tags\">\
+                 <button class=\"btn btn-sm btn-outline-secondary\" type=\"submit\">Save tags</button>\
+                 </form>",
+                p.id,
+                esc(&return_to),
+                esc(&p.tags.join(", ")),
+            );
             if p.can_preview() {
                 format!(
-                    "<a class=\"photo-tile\" href=\"/photos/i/{id}/preview\" data-photo \
+                    "<div class=\"photo-card\"><a class=\"photo-tile\" href=\"/photos/i/{id}/preview\" data-photo \
                      data-original=\"/photos/i/{id}/original\" data-caption=\"{caption}\">\
                      <span class=\"photo-thumb\"><img src=\"/photos/i/{id}/thumb\" \
                      alt=\"{caption}\" loading=\"lazy\" decoding=\"async\">\
                      <span class=\"photo-load-error\" hidden>Preview unavailable</span></span>\
-                     <span class=\"photo-caption\">{caption}</span></a>",
+                     <span class=\"photo-caption\">{caption}</span></a>{tag_form}</div>",
                     id = p.id,
                     caption = esc(filename),
+                    tag_form = tag_form,
                 )
             } else {
                 format!(
-                    "<a class=\"photo-tile\" href=\"/photos/i/{id}/original\">\
+                    "<div class=\"photo-card\"><a class=\"photo-tile\" href=\"/photos/i/{id}/original\">\
                      <span class=\"photo-thumb photo-unsupported\">HEIC photo<br>Download to view</span>\
-                     <span class=\"photo-caption\">{caption}</span></a>",
+                     <span class=\"photo-caption\">{caption}</span></a>{tag_form}</div>",
                     id = p.id,
                     caption = esc(filename),
+                    tag_form = tag_form,
                 )
             }
         })
@@ -1087,6 +1105,20 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
              {subtags}{list}",
             page_title("Photos"),
             view.total
+        ),
+    )
+}
+
+pub fn photo_tags_error(user: &User, features: Features, message: &str) -> String {
+    app_page(
+        "Photo tags",
+        "photos",
+        user,
+        features,
+        &format!(
+            "{}<div class=\"alert alert-danger\">{}</div><a href=\"/photos\">Back to photos</a>",
+            page_title("Photo tags"),
+            esc(message)
         ),
     )
 }
@@ -1680,6 +1712,7 @@ mod tests {
             photos: vec![photos::Photo {
                 id: 7,
                 path: "2018/<x>.jpg".into(),
+                tags: vec!["mike".into()],
             }],
             total: 3,
             page: 1,
@@ -1689,6 +1722,8 @@ mod tests {
         assert!(html.contains("&lt;x&gt;.jpg"));
         assert!(html.contains("src=\"/photos/i/7/thumb\""));
         assert!(html.contains("href=\"/photos/i/7/preview\""));
+        assert!(html.contains("name=\"tags\" value=\"mike\""));
+        assert!(html.contains("action=\"/photos/i/7/tags\""));
         assert!(html.contains("Showing 1-1 of 3"));
     }
 
@@ -1700,6 +1735,7 @@ mod tests {
             photos: vec![photos::Photo {
                 id: 8,
                 path: "phone.HEIC".into(),
+                tags: Vec::new(),
             }],
             total: 130,
             page: 2,
