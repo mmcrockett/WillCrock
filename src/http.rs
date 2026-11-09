@@ -47,8 +47,38 @@ fn multipart_boundary(content_type: &str) -> Option<&str> {
     boundary
 }
 
+fn split_header_parameters(value: &str) -> Option<Vec<&str>> {
+    let mut parameters = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in value.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b';' if !quoted => {
+                parameters.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if quoted || escaped {
+        return None;
+    }
+    parameters.push(&value[start..]);
+    Some(parameters)
+}
+
 fn is_photo_file_disposition(disposition: &str) -> bool {
-    let mut parameters = disposition.split(';');
+    let Some(parameters) = split_header_parameters(disposition) else {
+        return false;
+    };
+    let mut parameters = parameters.into_iter();
     if !parameters
         .next()
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("form-data"))
@@ -348,7 +378,7 @@ mod tests {
         let boundary = "photo-boundary";
         let image = [0xff, 0, b'a', b'\r', b'\n', 0x80];
         let mut body = format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"holiday; name=beach.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
         )
         .into_bytes();
         body.extend_from_slice(&image);
