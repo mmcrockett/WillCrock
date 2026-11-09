@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Two-way sync of the photo library with the server, then tell the server what the Mac has.
-# Never deletes on either side: remove a photo locally AND on the server, or it comes back.
+# Only remove a known old path after a moved photo's new local copy matches it byte-for-byte.
 set -euo pipefail
 
 usage() {
@@ -23,6 +23,7 @@ remote_dir="data/willcrock.com/photos"
 fcgi="willcrock.com/willcrock.fcgi" # relative to the remote home dir
 
 mkdir -p "$local_dir"
+local_dir="$(cd "$local_dir" && pwd -P)"
 rsync_opts=(-a --itemize-changes --exclude '.*')
 
 # One authenticated master connection, so the password is asked once per run.
@@ -33,6 +34,58 @@ ssh "${ssh_opts[@]}" -o ControlMaster=yes -fN "$login"
 
 echo "== pull"
 rsync -e "ssh ${ssh_opts[*]}" "${rsync_opts[@]}" "$login:$remote_dir/" "$local_dir/"
+echo "== reconcile moved photos"
+moves="$(ssh "${ssh_opts[@]}" "$login" "$fcgi photos moved")"
+: > "$ctl_dir/ack-moves"
+if [ -n "$moves" ]; then
+  if ! command -v shasum >/dev/null 2>&1 && ! command -v sha256sum >/dev/null 2>&1; then
+    echo "shasum or sha256sum is required to reconcile moved photos" >&2
+    exit 1
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
+  else
+    hash_file() { sha256sum "$1" | awk '{print $1}'; }
+  fi
+  while IFS=$'\t' read -r old new expected_sha; do
+    [ -n "$old" ] && [ -n "$new" ] && [ -n "$expected_sha" ] || {
+      echo "invalid moved-photo record" >&2
+      exit 1
+    }
+    if [ "${#expected_sha}" -ne 64 ] || [[ ! "$expected_sha" =~ ^[[:xdigit:]]{64}$ ]]; then
+      echo "invalid moved-photo hash" >&2
+      exit 1
+    fi
+    for path in "$old" "$new"; do
+      case "$path" in
+        ""|.|..|/*|../*|*/../*|*/..|./*|*/./*|*/.|*/.)
+          echo "unsafe moved-photo path: $path" >&2
+          exit 1
+          ;;
+      esac
+    done
+    old_local="$local_dir/$old"
+    new_local="$local_dir/$new"
+    if [ "$old" != "$new" ] && [ -f "$old_local" ] && [ -f "$new_local" ]; then
+      old_parent="$(cd "$(dirname "$old_local")" && pwd -P)"
+      new_parent="$(cd "$(dirname "$new_local")" && pwd -P)"
+      case "$old_parent" in
+        "$local_dir"|"$local_dir"/*) ;;
+        *) echo "moved-photo path escapes library: $old" >&2; exit 1 ;;
+      esac
+      case "$new_parent" in
+        "$local_dir"|"$local_dir"/*) ;;
+        *) echo "moved-photo path escapes library: $new" >&2; exit 1 ;;
+      esac
+      if [ "$expected_sha" = "$(hash_file "$new_local")" ]; then
+        if cmp -s "$old_local" "$new_local"; then
+          rm -f -- "$old_local"
+        fi
+      fi
+    fi
+    printf '%s\n' "$old" >> "$ctl_dir/ack-moves"
+  done <<< "$moves"
+fi
 echo "== push"
 rsync -e "ssh ${ssh_opts[*]}" "${rsync_opts[@]}" "$local_dir/" "$login:$remote_dir/"
 echo "== scan"
@@ -45,3 +98,6 @@ else
 fi
 (cd "$local_dir" && find . -type f ! -name '.*' -exec stat "${stat_fmt[@]}" {} + | sed 's|^\./||') |
   ssh "${ssh_opts[@]}" "$login" "$fcgi photos mark-synced"
+if [ -s "$ctl_dir/ack-moves" ]; then
+  ssh "${ssh_opts[@]}" "$login" "$fcgi photos ack-moves" < "$ctl_dir/ack-moves"
+fi

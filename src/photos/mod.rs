@@ -94,6 +94,111 @@ fn add_date_tags(tx: &rusqlite::Transaction, photo_id: i64, date: &str) -> rusql
     add_tag(tx, photo_id, &date[..7])
 }
 
+fn month_album(date: &str) -> Option<String> {
+    let month = date.get(..7)?;
+    let (year, number) = month.split_once('-')?;
+    if year.len() != 4
+        || number.len() != 2
+        || !year.bytes().all(|b| b.is_ascii_digit())
+        || !number.bytes().all(|b| b.is_ascii_digit())
+        || !format!("{month}-01")
+            .parse::<jiff::civil::Date>()
+            .is_ok_and(|date| date.year() > 0)
+    {
+        return None;
+    }
+    Some(format!("{year}/{year}{number}00"))
+}
+
+fn photo_file(root: &Path, rel: &str) -> Result<std::path::PathBuf, String> {
+    if !Path::new(rel)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!("invalid photo path: {rel}"));
+    }
+    let path = root.join(rel);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("invalid photo path: {rel}"))?
+        .canonicalize()
+        .map_err(|e| format!("photo directory for {rel}: {e}"))?;
+    if !parent.starts_with(root) {
+        return Err(format!("photo path is outside library: {rel}"));
+    }
+    let metadata = std::fs::symlink_metadata(&path).map_err(|e| format!("photo {rel}: {e}"))?;
+    if !metadata.file_type().is_file() {
+        return Err(format!("photo is not a regular file: {rel}"));
+    }
+    Ok(path)
+}
+
+fn move_photo_file(root: &Path, old_path: &str, new_path: &str) -> Result<String, String> {
+    let source = photo_file(root, old_path)?;
+    let sha256 = hash(&source)?;
+    let destination = root.join(new_path);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("invalid photo path: {new_path}"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("create photo directory for {new_path}: {e}"))?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| format!("photo directory for {new_path}: {e}"))?;
+    if !parent.starts_with(root) {
+        return Err(format!("photo path is outside library: {new_path}"));
+    }
+    let destination = parent.join(
+        Path::new(new_path)
+            .file_name()
+            .ok_or_else(|| format!("invalid photo path: {new_path}"))?,
+    );
+    std::fs::hard_link(&source, &destination)
+        .map_err(|e| format!("publish moved photo {new_path}: {e}"))?;
+    if let Err(error) = std::fs::remove_file(&source) {
+        if let Err(cleanup) = std::fs::remove_file(&destination) {
+            crate::log::error(&format!(
+                "remove incomplete moved photo {}: {cleanup}",
+                destination.display()
+            ));
+        }
+        return Err(format!("remove old photo {old_path}: {error}"));
+    }
+    Ok(sha256)
+}
+
+fn undo_photo_file_move(root: &Path, old_path: &str, new_path: &str) -> Result<(), String> {
+    let source = root.join(old_path);
+    let destination = photo_file(root, new_path)?;
+    std::fs::hard_link(&destination, &source)
+        .map_err(|e| format!("restore old photo {old_path}: {e}"))?;
+    std::fs::remove_file(destination).map_err(|e| format!("remove moved photo {new_path}: {e}"))
+}
+
+fn record_photo_move(
+    tx: &rusqlite::Transaction<'_>,
+    photo_id: i64,
+    old_path: &str,
+    new_path: &str,
+    sha256: &str,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE photo_moves SET new_path = ?1, sha256 = ?2 \
+         WHERE photo_id = ?3 AND new_path = ?4",
+        params![new_path, sha256, photo_id, old_path],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO photo_moves (photo_id, old_path, new_path, sha256) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![photo_id, old_path, new_path, sha256],
+    )?;
+    tx.execute(
+        "DELETE FROM photo_moves WHERE photo_id = ?1 AND old_path = new_path",
+        [photo_id],
+    )?;
+    Ok(())
+}
+
 const LIVE_WITH_ALL_TAGS: &str = "SELECT p.id FROM photos p WHERE p.missing_at IS NULL AND \
      (SELECT COUNT(*) FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
       WHERE pt.photo_id = p.id AND t.name IN ({in})) = {n}";
@@ -232,14 +337,19 @@ pub fn set_tags(conn: &Connection, photo_id: i64, names: &[String]) -> rusqlite:
 pub fn run(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("scan") => scan_cmd(),
+        Some("migrate-uploads") => migrate_uploads_cmd(),
         Some("unsynced") => unsynced_cmd(),
         Some("mark-synced") => mark_synced_cmd(),
+        Some("moved") => moved_cmd(),
+        Some("ack-moves") => ack_moves_cmd(),
         Some("prune-albums") => {
             let (_, conn) = open_db();
             let n = albums::prune(&conn, cli::now()).unwrap_or_else(|e| cli::fail(e));
             println!("removed {n} expired albums");
         }
-        _ => cli::fail("usage: willcrock photos scan|unsynced|mark-synced|prune-albums"),
+        _ => cli::fail(
+            "usage: willcrock photos scan|migrate-uploads|unsynced|mark-synced|moved|ack-moves|prune-albums",
+        ),
     }
 }
 
@@ -261,11 +371,47 @@ fn scan_cmd() {
     );
 }
 
+fn migrate_uploads_cmd() {
+    let (cfg, mut conn) = open_db();
+    let Some(photos) = cfg.photos.as_ref() else {
+        cli::fail("no [photos] section in config");
+    };
+    let n = migrate_uploads(&mut conn, Path::new(&photos.dir)).unwrap_or_else(|e| cli::fail(e));
+    println!("migrated {n} uploads");
+}
+
 fn unsynced_cmd() {
     let (_, conn) = open_db();
     for path in unsynced(&conn).unwrap_or_else(|e| cli::fail(e)) {
         println!("{path}");
     }
+}
+
+fn moved_cmd() {
+    let (_, conn) = open_db();
+    let mut stmt = conn
+        .prepare("SELECT old_path, new_path, sha256 FROM photo_moves ORDER BY old_path")
+        .unwrap_or_else(|e| cli::fail(e));
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap_or_else(|e| cli::fail(e));
+    for row in rows {
+        let (old_path, new_path, sha256) = row.unwrap_or_else(|e| cli::fail(e));
+        println!("{old_path}\t{new_path}\t{sha256}");
+    }
+}
+
+fn ack_moves_cmd() {
+    let (_, conn) = open_db();
+    let n =
+        acknowledge_photo_moves(&conn, std::io::stdin().lock()).unwrap_or_else(|e| cli::fail(e));
+    println!("acknowledged {n} moved paths");
 }
 
 fn mark_synced_cmd() {
@@ -314,6 +460,25 @@ pub fn mark_synced(
     }
     tx.commit().map_err(db_err)?;
     Ok(marked)
+}
+
+pub fn acknowledge_photo_moves(
+    conn: &Connection,
+    input: impl std::io::BufRead,
+) -> Result<usize, String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let mut acknowledged = 0;
+    for line in input.lines() {
+        let path = line.map_err(|e| format!("read move manifest: {e}"))?;
+        if path.is_empty() || path.contains('\t') {
+            return Err("invalid move manifest path".into());
+        }
+        acknowledged += tx
+            .execute("DELETE FROM photo_moves WHERE old_path = ?1", [path])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(acknowledged)
 }
 
 pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
@@ -443,6 +608,88 @@ pub fn scan(conn: &mut Connection, root: &Path, now: i64) -> Result<ScanReport, 
     }
     tx.commit().map_err(db_err)?;
     Ok(report)
+}
+
+pub fn migrate_uploads(conn: &mut Connection, root: &Path) -> Result<usize, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("photo directory: {e}"))?;
+    let rows = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, path, taken_on FROM photos \
+                 WHERE substr(path, 1, 8) = 'uploads/' AND missing_at IS NULL ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+
+    let mut migrated = 0;
+    for (id, old_path, date) in rows {
+        let date = date.ok_or_else(|| format!("upload {old_path} has no date"))?;
+        let album = month_album(&date)
+            .ok_or_else(|| format!("upload {old_path} has an invalid date: {date}"))?;
+        let name = Path::new(&old_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid photo path: {old_path}"))?;
+        let new_path = format!("{album}/{name}");
+        let source = photo_file(&root, &old_path)?;
+        let metadata =
+            std::fs::metadata(&source).map_err(|e| format!("stat photo {old_path}: {e}"))?;
+        let now_mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let sha256 = move_photo_file(&root, &old_path, &new_path)?;
+        let database_result = (|| -> Result<(), String> {
+            let changed = tx
+                .execute(
+                    "UPDATE photos SET path = ?1, album = ?2, size = ?3, mtime = ?4, \
+                     sha256 = ?5, synced_at = NULL WHERE id = ?6 AND path = ?7",
+                    params![
+                        new_path,
+                        album,
+                        metadata.len() as i64,
+                        now_mtime,
+                        sha256,
+                        id,
+                        old_path
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            if changed != 1 {
+                return Err(format!("upload {old_path} changed during migration"));
+            }
+            record_photo_move(&tx, id, &old_path, &new_path, &sha256).map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())
+        })();
+        if let Err(error) = database_result {
+            if let Err(rollback) = undo_photo_file_move(&root, &old_path, &new_path) {
+                crate::log::error(&format!("roll back photo move {old_path}: {rollback}"));
+            }
+            return Err(error);
+        }
+        migrated += 1;
+    }
+    Ok(migrated)
 }
 
 struct Found {
@@ -778,5 +1025,70 @@ mod tests {
         assert_eq!(t("ScannedPhotos"), None);
         assert_eq!(t("2018/20181300"), None);
         assert_eq!(t(""), None);
+    }
+
+    #[test]
+    fn move_ledger_tracks_original_paths_across_repeated_moves() {
+        let conn = db::open_memory();
+        conn.execute(
+            "INSERT INTO photos (path, album, size, mtime, sha256, created_at) \
+             VALUES ('uploads/photo.jpg', 'uploads', 1, 0, 'hash', 0)",
+            [],
+        )
+        .unwrap();
+        let photo_id = conn.last_insert_rowid();
+        let tx = conn.unchecked_transaction().unwrap();
+        record_photo_move(
+            &tx,
+            photo_id,
+            "uploads/photo.jpg",
+            "2026/20260100/photo.jpg",
+            "hash",
+        )
+        .unwrap();
+        record_photo_move(
+            &tx,
+            photo_id,
+            "2026/20260100/photo.jpg",
+            "2026/20260200/photo.jpg",
+            "hash",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT old_path, new_path, sha256 FROM photo_moves ORDER BY old_path")
+            .unwrap();
+        let moves: Vec<(String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            moves,
+            vec![
+                (
+                    "2026/20260100/photo.jpg".into(),
+                    "2026/20260200/photo.jpg".into(),
+                    "hash".into()
+                ),
+                (
+                    "uploads/photo.jpg".into(),
+                    "2026/20260200/photo.jpg".into(),
+                    "hash".into()
+                )
+            ]
+        );
+        assert_eq!(
+            acknowledge_photo_moves(
+                &conn,
+                "uploads/photo.jpg\n2026/20260100/photo.jpg\n".as_bytes()
+            )
+            .unwrap(),
+            2
+        );
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM photo_moves", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 }
