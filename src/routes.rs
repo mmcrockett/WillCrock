@@ -1166,7 +1166,9 @@ mod tests {
         );
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
         assert!(html.contains("Roasted soup"));
-        assert!(html.contains("text-body-secondary opacity-50"));
+        assert!(
+            html.contains("<span class=\"flex-grow-1 text-body-secondary\">Roasted soup</span>")
+        );
 
         assert_eq!(
             call(&conn, &granted, "POST", "/recipes", "name=Fresh+soup").0,

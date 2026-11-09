@@ -941,8 +941,8 @@ pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Optio
                 .map(|recipe| {
                     if recipe.archived {
                         format!(
-                            "<li class=\"d-flex gap-2 align-items-center mb-2 text-body-secondary opacity-50\">\
-                             <span class=\"flex-grow-1\">{}</span>\
+                            "<li class=\"d-flex gap-2 align-items-center mb-2\">\
+                             <span class=\"flex-grow-1 text-body-secondary\">{}</span>\
                              <form method=\"post\" action=\"/recipes/{}/restore\">\
                              <button class=\"btn btn-outline-secondary\">Restore</button></form></li>",
                             esc(&recipe.name),
@@ -1763,9 +1763,10 @@ mod tests {
         assert!(!html.contains("value=\"Tomato <soup>\""));
         assert!(html.contains("action=\"/recipes\""));
         assert!(html.contains("action=\"/recipes/7/archive\""));
-        assert!(html.contains("text-body-secondary opacity-50"));
-        assert!(html.contains("Old soup"));
+        assert!(html.contains("<span class=\"flex-grow-1 text-body-secondary\">Old soup</span>"));
         assert!(html.contains("action=\"/recipes/8/restore\""));
+        assert!(html.contains("<button class=\"btn btn-outline-secondary\">Restore</button>"));
+        assert!(!html.contains("opacity-50"));
         assert!(!html.contains("Delete"));
     }
 
