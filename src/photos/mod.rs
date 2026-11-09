@@ -8,7 +8,9 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 mod images;
+mod upload;
 pub use images::{image_file, ImageKind};
+pub use upload::{change_date, upload, UploadError};
 
 const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "heic", "webp"];
 
@@ -84,6 +86,11 @@ fn add_tag(tx: &rusqlite::Transaction, photo_id: i64, name: &str) -> rusqlite::R
         params![photo_id, name],
     )?;
     Ok(())
+}
+
+fn add_date_tags(tx: &rusqlite::Transaction, photo_id: i64, date: &str) -> rusqlite::Result<()> {
+    add_tag(tx, photo_id, &date[..4])?;
+    add_tag(tx, photo_id, &date[..7])
 }
 
 const LIVE_WITH_ALL_TAGS: &str = "SELECT p.id FROM photos p WHERE p.missing_at IS NULL AND \
@@ -354,10 +361,13 @@ pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
 }
 
 pub fn scan(conn: &mut Connection, root: &Path, now: i64) -> Result<ScanReport, String> {
+    let db_err = |e: rusqlite::Error| e.to_string();
+    // Keep uploads from entering the database after the filesystem snapshot.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(db_err)?;
     let mut files = Vec::new();
     walk(root, root, &mut files)?;
-    let db_err = |e: rusqlite::Error| e.to_string();
-    let tx = conn.transaction().map_err(db_err)?;
     let mut report = ScanReport::default();
     let mut seen = HashSet::new();
     for f in &files {
@@ -404,8 +414,7 @@ pub fn scan(conn: &mut Connection, root: &Path, now: i64) -> Result<ScanReport, 
                 .map_err(db_err)?;
                 let id = tx.last_insert_rowid();
                 if let Some(taken_on) = taken_on_from_album(album_of(&f.rel)) {
-                    add_tag(&tx, id, &taken_on[..4]).map_err(db_err)?;
-                    add_tag(&tx, id, &taken_on[..7]).map_err(db_err)?;
+                    add_date_tags(&tx, id, &taken_on).map_err(db_err)?;
                 }
                 report.added += 1;
             }

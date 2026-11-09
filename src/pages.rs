@@ -981,8 +981,19 @@ pub fn photos(user: &User, features: Features, summary: Option<&photos::Summary>
                 )
             };
             format!(
-                "<p class=\"text-body-secondary small\">{} photos{note}.</p>\
+                "<div class=\"card shadow-sm mb-4\"><div class=\"card-body\">\
+                 <h2 class=\"h5\">Upload photos</h2>\
+                 <form id=\"photo-upload\"><label class=\"form-label\" for=\"photo-files\">Choose photos</label>\
+                 <input class=\"form-control mb-2\" id=\"photo-files\" type=\"file\" \
+                 accept=\"image/jpeg,image/png,image/gif,image/webp,image/heic,.heic\" multiple required>\
+                 <p class=\"text-body-secondary small\">Up to 25 MB per photo. Dates come from photo metadata when available.</p>\
+                 <button class=\"btn btn-primary\" type=\"submit\">Upload</button></form>\
+                 <noscript>Enable JavaScript to upload photos.</noscript>\
+                 <div id=\"photo-upload-results\" class=\"mt-3\" aria-live=\"polite\"></div>\
+                 </div></div><script src=\"{}\" defer></script>\
+                 <p class=\"text-body-secondary small\">{} photos{note}.</p>\
                  <h2 class=\"h6\">Years</h2><div>{}</div>{others}",
+                asset("/static/photo-upload.js"),
                 s.total,
                 tag_links(&s.years, "")
             )
@@ -1710,6 +1721,7 @@ mod tests {
         let u = user(1, "mike", true);
         let none = photos(&u, Features::default(), None);
         assert!(none.contains("not configured"));
+        assert!(!none.contains("id=\"photo-upload\""));
         let tc = |name: &str, count| photos::TagCount {
             name: name.into(),
             count,
@@ -1723,6 +1735,8 @@ mod tests {
             unsynced: 3,
         };
         let html = photos(&u, Features::default(), Some(&summary));
+        assert!(html.contains("id=\"photo-upload\""));
+        assert!(html.contains("/static/photo-upload.js?v="));
         assert!(html.contains("5 photos, 1 untagged, 2 missing from disk, 3 not yet synced"));
         assert!(html.contains("href=\"/photos/t/2018\""));
         assert!(html.contains("href=\"/photos/t/%3Cb%3Emike%3C%2Fb%3E\""));
