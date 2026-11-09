@@ -133,20 +133,27 @@ pub fn multipart_upload_file<'a>(body: &'a [u8], content_type: &str) -> Option<&
     }
 
     let data_start = header_end + 4;
-    let closing = format!("\r\n--{boundary}--").into_bytes();
-    let body = body.strip_suffix(b"\r\n").unwrap_or(body);
-    let data_end = body.strip_suffix(closing.as_slice())?;
-    if data_end.len() < data_start {
-        return None;
+    let data = &body[data_start..];
+    let delimiter = format!("\r\n--{boundary}");
+    let mut offset = 0;
+    loop {
+        let marker = offset
+            + data[offset..]
+                .windows(delimiter.len())
+                .position(|window| window == delimiter.as_bytes())?;
+        let suffix_start = marker + delimiter.len();
+        let suffix = &data[suffix_start..];
+        if let Some(epilogue) = suffix.strip_prefix(b"--") {
+            if epilogue.is_empty() || epilogue == b"\r\n" {
+                return Some(&data[..marker]);
+            }
+            return None;
+        }
+        if suffix.starts_with(b"\r\n") {
+            return None;
+        }
+        offset = suffix_start;
     }
-    let next_part = format!("\r\n--{boundary}\r\n");
-    if body[data_start..data_end.len()]
-        .windows(next_part.len())
-        .any(|window| window == next_part.as_bytes())
-    {
-        return None;
-    }
-    Some(&body[data_start..data_end.len()])
 }
 
 fn read_body(reader: impl Read, limit: u64) -> (Vec<u8>, Option<u16>) {
@@ -410,6 +417,17 @@ mod tests {
 
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n\r\nphoto\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"extra\"\r\n\r\nvalue\r\n--{boundary}--\r\n"
+        );
+        assert_eq!(
+            multipart_upload_file(
+                body.as_bytes(),
+                &format!("multipart/form-data; boundary={boundary}")
+            ),
+            None
+        );
+
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n\r\nphoto\r\n--{boundary}--\r\nepilogue\r\n--{boundary}--\r\n"
         );
         assert_eq!(
             multipart_upload_file(
