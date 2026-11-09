@@ -1,7 +1,7 @@
 use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{session_cookie, urlencode, Req, Resp};
-use crate::{log, mail, pages, photos, pickle, sms, trips};
+use crate::{log, mail, pages, photos, pickle, recipes, sms, trips};
 use rusqlite::{Connection, OptionalExtension};
 
 fn features(cfg: &Config) -> pages::Features {
@@ -216,12 +216,8 @@ fn authed(
                 Ok(Resp::html(404, pages::not_found()))
             }
         }
-        ("GET", [page @ "recipes"]) if Feature::parse(page).is_some_and(|f| user.can(f)) => {
-            let feature = Feature::parse(page).expect("matched above");
-            Ok(Resp::html(
-                200,
-                pages::placeholder(user, features(cfg), feature),
-            ))
+        (_, ["recipes", rest @ ..]) if user.can(Feature::Recipes) => {
+            recipes_route(conn, cfg, req, user, rest, now)
         }
         (_, ["trips", rest @ ..]) if user.can(Feature::Trips) => {
             trips_route(conn, cfg, req, user, rest, now)
@@ -456,6 +452,87 @@ fn sms_page(cfg: &Config, user: &User) -> Resp {
     Resp::html(
         200,
         pages::sms(user, features(cfg), quackr, messages.as_deref()),
+    )
+}
+
+fn recipes_route(
+    conn: &Connection,
+    cfg: &Config,
+    req: &Req,
+    user: &User,
+    segs: &[&str],
+    now: i64,
+) -> rusqlite::Result<Resp> {
+    let feats = features(cfg);
+    let not_found = || Ok(Resp::html(404, pages::not_found()));
+    let page = |status, error| -> rusqlite::Result<Resp> {
+        let recipes = recipes::list(conn)?;
+        Ok(Resp::html(
+            status,
+            pages::recipes(user, feats, &recipes, error),
+        ))
+    };
+    let set_archived = |id: &str, archived: bool| -> rusqlite::Result<Resp> {
+        let Ok(id) = id.parse::<i64>() else {
+            return not_found();
+        };
+        if recipes::set_archived(conn, id, archived, now)? == 1 {
+            Ok(Resp::redirect("/recipes"))
+        } else {
+            not_found()
+        }
+    };
+    match (req.method.as_str(), segs) {
+        ("GET", []) => page(200, None),
+        ("POST", []) => {
+            let name =
+                match recipes::parse_name(req.form.get("name").map(String::as_str).unwrap_or("")) {
+                    Ok(name) => name,
+                    Err(error) => return page(400, Some(error)),
+                };
+            match recipes::add(conn, &name) {
+                Ok(_) => Ok(Resp::redirect("/recipes")),
+                Err(error) if is_constraint_violation(&error) => {
+                    page(400, Some("A recipe with that name already exists."))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        ("POST", [id]) => {
+            let Ok(id) = id.parse::<i64>() else {
+                return not_found();
+            };
+            let Some(recipe) = recipes::get(conn, id)? else {
+                return not_found();
+            };
+            if recipe.archived {
+                return not_found();
+            }
+            let name =
+                match recipes::parse_name(req.form.get("name").map(String::as_str).unwrap_or("")) {
+                    Ok(name) => name,
+                    Err(error) => return page(400, Some(error)),
+                };
+            match recipes::rename(conn, id, &name) {
+                Ok(1) => Ok(Resp::redirect("/recipes")),
+                Ok(_) => not_found(),
+                Err(error) if is_constraint_violation(&error) => {
+                    page(400, Some("A recipe with that name already exists."))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        ("POST", [id, "archive"]) => set_archived(id, true),
+        ("POST", [id, "restore"]) => set_archived(id, false),
+        _ => not_found(),
+    }
+}
+
+fn is_constraint_violation(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
     )
 }
 
@@ -1050,6 +1127,97 @@ mod tests {
         );
         assert_eq!(call(&conn, &me, "POST", "/trips/1/delete", "").0, 303);
         assert_eq!(call(&conn, &me, "GET", "/trips/1", "").0, 404);
+    }
+
+    #[test]
+    fn recipes_flow_is_shared_and_supports_basic_changes() {
+        let conn = db::open_memory();
+        let granted = user(vec![Feature::Recipes]);
+
+        let (status, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert_eq!(status, 200);
+        assert!(html.contains("No recipes yet."));
+
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes", "name=Tomato+soup").0,
+            303
+        );
+        let (status, html) = call(&conn, &granted, "POST", "/recipes", "name=tomato+soup");
+        assert_eq!(status, 400);
+        assert!(html.contains("A recipe with that name already exists."));
+
+        let (status, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert_eq!(status, 200);
+        assert!(html.contains("value=\"Tomato soup\""));
+        let mut other = user(vec![Feature::Recipes]);
+        other.id = 2;
+        let (_, html) = call(&conn, &other, "GET", "/recipes", "");
+        assert!(html.contains("value=\"Tomato soup\""));
+
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1", "name=Roasted+soup").0,
+            303
+        );
+        let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert!(html.contains("value=\"Roasted soup\""));
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1/archive", "").0,
+            303
+        );
+        let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert!(html.contains("Roasted soup"));
+        assert!(
+            html.contains("<span class=\"flex-grow-1 text-body-secondary\">Roasted soup</span>")
+        );
+
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes", "name=Fresh+soup").0,
+            303
+        );
+        let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert!(html.find("value=\"Fresh soup\"").unwrap() < html.find("Roasted soup").unwrap());
+
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1", "name=Changed+soup").0,
+            404
+        );
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1/restore", "").0,
+            303
+        );
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1/delete", "").0,
+            404
+        );
+        let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert!(
+            html.find("value=\"Fresh soup\"").unwrap()
+                < html.find("value=\"Roasted soup\"").unwrap()
+        );
+        assert!(!html.contains("Delete"));
+    }
+
+    #[test]
+    fn recipes_need_the_grant_for_reads_and_writes() {
+        let conn = db::open_memory();
+        let granted = user(vec![Feature::Recipes]);
+        call(&conn, &granted, "POST", "/recipes", "name=Soup");
+        let other = user(vec![Feature::Sms]);
+        for (method, path, form) in [
+            ("GET", "/recipes", ""),
+            ("POST", "/recipes", "name=Denied"),
+            ("POST", "/recipes/1", "name=Denied"),
+            ("POST", "/recipes/1/archive", ""),
+            ("POST", "/recipes/1/restore", ""),
+            ("POST", "/recipes/1/delete", ""),
+        ] {
+            assert_eq!(
+                call(&conn, &other, method, path, form).0,
+                404,
+                "{method} {path}"
+            );
+        }
+        assert_eq!(call(&conn, &granted, "GET", "/recipes", "").0, 200);
     }
 
     #[test]

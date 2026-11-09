@@ -162,6 +162,16 @@ CREATE TABLE shared_album_photos (
   PRIMARY KEY (album_id, photo_id)
 );
 ",
+    "
+CREATE TABLE recipes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0)
+);
+CREATE UNIQUE INDEX recipes_name ON recipes(name COLLATE NOCASE);
+",
+    "
+ALTER TABLE recipes ADD COLUMN archived_at INTEGER;
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
