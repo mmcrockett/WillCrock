@@ -67,6 +67,57 @@
     });
   }
 
+  document.querySelectorAll("[data-share-link]").forEach((input) => {
+    input.value = new URL(input.value, window.location.origin).href;
+    input.addEventListener("click", () => input.select());
+  });
+  const shareForm = document.querySelector("#share-album");
+  if (shareForm) {
+    const key = "willcrock-share-selection";
+    let selected = new Set();
+    try {
+      if (new URLSearchParams(window.location.search).has("created")) sessionStorage.removeItem(key);
+      selected = new Set(JSON.parse(sessionStorage.getItem(key) || "[]"));
+    } catch (error) {
+      console.error("Could not restore album selection", error);
+    }
+    const ids = document.createElement("input");
+    ids.type = "hidden";
+    ids.name = "photo_ids";
+    shareForm.append(ids);
+    const checkboxes = document.querySelectorAll("[data-share-photo]");
+    const update = () => {
+      ids.value = Array.from(selected).join(",");
+      shareForm.querySelector("[data-share-selection]").hidden = selected.size === 0;
+      shareForm.querySelector("[data-share-count]").textContent = selected.size;
+      try {
+        sessionStorage.setItem(key, JSON.stringify(Array.from(selected)));
+      } catch (error) {
+        console.error("Could not save album selection", error);
+      }
+    };
+    checkboxes.forEach((checkbox) => {
+      checkbox.checked = selected.has(checkbox.dataset.sharePhoto);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selected.add(checkbox.dataset.sharePhoto);
+        else selected.delete(checkbox.dataset.sharePhoto);
+        update();
+      });
+    });
+    shareForm.querySelector("[data-share-clear]").addEventListener("click", () => {
+      selected.clear();
+      checkboxes.forEach((checkbox) => { checkbox.checked = false; });
+      update();
+    });
+    update();
+  } else if (document.querySelector("[data-share-link]") &&
+             new URLSearchParams(window.location.search).has("created")) {
+    try {
+      sessionStorage.removeItem("willcrock-share-selection");
+    } catch (error) {
+      console.error("Could not clear album selection", error);
+    }
+  }
   const viewer = document.querySelector(".photo-viewer");
   if (!viewer) return;
   const tiles = Array.from(document.querySelectorAll("[data-photo]"));
