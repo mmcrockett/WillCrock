@@ -22,7 +22,6 @@ pub fn handle(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> Resp {
 }
 
 fn dispatch(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::Result<Resp> {
-    photos::albums::prune(conn, now)?;
     let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
     let method = req.method.as_str();
 
@@ -203,7 +202,9 @@ fn authed(
                     .form
                     .get("return_to")
                     .filter(|path| {
-                        path.starts_with("/photos/t/")
+                        (path.starts_with("/photos/t/")
+                            || *path == "/photos/all"
+                            || path.starts_with("/photos/all?"))
                             && path
                                 .bytes()
                                 .all(|b| b.is_ascii_alphanumeric() || b"/%?=&.-_~".contains(&b))
@@ -786,6 +787,18 @@ mod tests {
         assert!(String::from_utf8(saved)
             .unwrap()
             .contains("Location: /photos/t/2026"));
+        let saved_all = call(
+            &granted,
+            Req::test(
+                "POST",
+                &format!("/photos/i/{id}/tags"),
+                "tags=Alice%2C+Bob&return_to=%2Fphotos%2Fall%3Fpage%3D2",
+            ),
+        );
+        assert!(saved_all.starts_with(b"Status: 303\r\n"));
+        assert!(String::from_utf8(saved_all)
+            .unwrap()
+            .contains("Location: /photos/all?page=2"));
         let people =
             String::from_utf8(call(&granted, Req::test("GET", "/photos/t/alice", ""))).unwrap();
         assert!(people.contains(&format!("/photos/i/{id}/thumb")));
@@ -962,9 +975,11 @@ mod tests {
             assert!(public(&format!("{url}/i/{one}/{kind}"), album.expires_at)
                 .starts_with(b"Status: 404"));
         }
-        assert!(photos::albums::list(&conn, owner.id, 100)
+        assert_eq!(photos::albums::list(&conn, owner.id, 100).unwrap().len(), 1);
+        assert!(photos::albums::list(&conn, owner.id, album.expires_at)
             .unwrap()
             .is_empty());
+        assert_eq!(photos::albums::prune(&conn, album.expires_at).unwrap(), 1);
         assert!(root.join("one.png").exists());
         assert_eq!(photos::summary(&conn).unwrap().total, 3);
 
