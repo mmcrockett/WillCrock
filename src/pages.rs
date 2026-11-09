@@ -1023,10 +1023,9 @@ pub fn photos(user: &User, features: Features, summary: Option<&photos::Summary>
             format!(
                 "<div class=\"card shadow-sm mb-4\"><div class=\"card-body\">\
                  <h2 class=\"h5\">Upload photos</h2>\
-                 <form id=\"photo-upload\"><label class=\"form-label\" for=\"photo-files\">Choose photos</label>\
+                 <form id=\"photo-upload\"><label class=\"visually-hidden\" for=\"photo-files\">Choose photos</label>\
                  <input class=\"form-control mb-2\" id=\"photo-files\" type=\"file\" \
                  accept=\"image/jpeg,image/png,image/gif,image/webp,image/heic,.heic\" multiple required>\
-                 <p class=\"text-body-secondary small\">Up to 25 MB per photo. Dates come from photo metadata when available.</p>\
                  <button class=\"btn btn-primary\" type=\"submit\">Upload</button></form>\
                  <noscript>Enable JavaScript to upload photos.</noscript>\
                  <div id=\"photo-upload-results\" class=\"mt-3\" aria-live=\"polite\"></div>\
@@ -1211,8 +1210,6 @@ fn photo_viewer() -> String {
 fn album_form() -> String {
     "<form id=\"share-album\" method=\"post\" action=\"/photos/albums\" class=\"card card-body mb-3\">\
      <h2 class=\"h6\">Create shareable album</h2>\
-     <p class=\"small\">Anyone with the link can view and download the selected photos. \
-     Expiration removes the album, not the original photos.</p>\
      <div class=\"row g-2 align-items-end\">\
      <div class=\"col-12 col-md\"><label class=\"form-label\" for=\"album-title\">Album name (optional)</label>\
      <input class=\"form-control\" id=\"album-title\" name=\"title\" maxlength=\"100\"></div>\
@@ -1228,6 +1225,13 @@ fn album_expiry(album: &photos::albums::Album) -> String {
     jiff::Timestamp::from_second(album.expires_at)
         .expect("album expiry is a valid timestamp")
         .strftime("%Y-%m-%d %H:%M UTC")
+        .to_string()
+}
+
+fn album_expiry_date(album: &photos::albums::Album) -> String {
+    jiff::Timestamp::from_second(album.expires_at)
+        .expect("album expiry is a valid timestamp")
+        .strftime("%B %-d, %Y")
         .to_string()
 }
 
@@ -1270,12 +1274,11 @@ pub fn shared_photo_album(album: &photos::albums::Album, photos: &[photos::Photo
     shell(
         &album.title,
         &format!(
-            "<main class=\"container py-4\">{}<p class=\"small\">Expires {}. \
-             Anyone with this link can view and download these photos.</p>\
-             <div class=\"photo-grid\">{}</div>{}</main>",
+            "<main class=\"container py-4\">{}<div class=\"photo-grid\">{}</div>\
+             <p class=\"small\">Expires {}</p>{}</main>",
             page_title(&album.title),
-            album_expiry(album),
             photo_tiles(photos, &prefix, None),
+            album_expiry_date(album),
             photo_viewer()
         ),
     )
@@ -1882,6 +1885,11 @@ mod tests {
         };
         let html = photos(&u, Features::default(), Some(&summary));
         assert!(html.contains("id=\"photo-upload\""));
+        assert!(html.contains("<h2 class=\"h5\">Upload photos</h2>"));
+        assert!(html.contains(
+            "<label class=\"visually-hidden\" for=\"photo-files\">Choose photos</label>"
+        ));
+        assert!(!html.contains("Up to 25 MB per photo."));
         assert!(html.contains("/static/photo-upload.js?v="));
         assert!(html.contains("5 photos, 1 untagged, 2 missing from disk, 3 not yet synced"));
         assert!(html.contains("href=\"/photos/t/2018\""));

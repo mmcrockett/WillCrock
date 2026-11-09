@@ -1038,6 +1038,8 @@ mod tests {
         }
         let all = request(&owner, "GET", "/photos/all", "");
         assert!(all.contains(&format!("data-share-photo=\"{private}\"")));
+        assert!(!all.contains("Anyone with the link can view and download the selected photos."));
+        assert!(!all.contains("Expiration removes the album, not the original photos."));
         assert!(request(&owner, "POST", "/photos/albums", &create)
             .contains("Location: /photos/albums?created=1"));
         let album = photos::albums::list(&conn, owner.id, 100)
@@ -1057,6 +1059,9 @@ mod tests {
         assert!(html.starts_with("Status: 200"));
         assert!(html.contains("Family"));
         assert!(html.contains(&format!("{url}/i/{one}/preview")));
+        assert!(html.contains("</div><p class=\"small\">Expires January 31, 1970</p>"));
+        assert!(!html.contains("Anyone with this link can view and download these photos."));
+        assert!(!html.contains("Expires 1970-01-31"));
         assert!(!html.contains("photo-tags"));
         assert!(!html.contains("/photos/i/"));
         assert!(!html.contains("private.png"));
