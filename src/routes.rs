@@ -1,6 +1,6 @@
 use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
-use crate::http::{session_cookie, urlencode, Req, Resp};
+use crate::http::{multipart_upload_file, session_cookie, urlencode, Req, Resp, MAX_PHOTO_SIZE};
 use crate::{log, mail, pages, photos, pickle, recipes, sms, trips};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -105,10 +105,22 @@ fn authed(
             photo_albums(conn, cfg, req, user, rest, now)
         }
         ("POST", ["photos", "upload"]) if user.can(Feature::Photos) && cfg.photos.is_some() => {
-            if req.requested_with != "1" || req.content_type != "application/octet-stream" {
+            if req.requested_with != "1" {
                 return Ok(Resp::json(
                     400,
                     &serde_json::json!({"error": "Invalid upload request."}),
+                ));
+            }
+            let Some(image) = multipart_upload_file(&req.body, &req.content_type) else {
+                return Ok(Resp::json(
+                    400,
+                    &serde_json::json!({"error": "Invalid upload request."}),
+                ));
+            };
+            if image.len() > MAX_PHOTO_SIZE {
+                return Ok(Resp::json(
+                    413,
+                    &serde_json::json!({"error": "Photo exceeds 25 MB."}),
                 ));
             }
             let root = std::path::Path::new(&cfg.photos.as_ref().expect("checked above").dir);
@@ -117,7 +129,7 @@ fn authed(
                 .get("filename")
                 .map(String::as_str)
                 .unwrap_or("photo");
-            Ok(match photos::upload(conn, root, filename, &req.body, now) {
+            Ok(match photos::upload(conn, root, filename, image, now) {
                 Ok(uploaded) => Resp::json(200, &uploaded),
                 Err(error) => photo_upload_error(error),
             })
@@ -938,9 +950,15 @@ mod tests {
         image::DynamicImage::new_rgb8(2, 2)
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
+        let boundary = "photo-upload-test";
         let mut req = Req::test("POST", "/photos/upload", "");
-        req.body = bytes.into_inner();
-        req.content_type = "application/octet-stream".into();
+        req.body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.png\"\r\nContent-Type: image/png\r\n\r\n"
+        )
+        .into_bytes();
+        req.body.extend(bytes.into_inner());
+        req.body.extend(format!("\r\n--{boundary}--\r\n").bytes());
+        req.content_type = format!("multipart/form-data; boundary={boundary}");
         req.requested_with = "1".into();
         assert!(call(&denied, &req).starts_with("Status: 404"));
         req.requested_with.clear();
@@ -953,6 +971,18 @@ mod tests {
         assert!(response.starts_with("Status: 200"));
         assert!(response.contains("\"duplicate\":false"));
         assert!(call(&granted, &req).contains("\"duplicate\":true"));
+        let valid_upload = req.body.clone();
+        req.body = b"not multipart".to_vec();
+        assert!(call(&granted, &req).contains("Invalid upload request."));
+        req.body = valid_upload;
+        let mut oversized = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n\r\n"
+        )
+        .into_bytes();
+        oversized.resize(oversized.len() + MAX_PHOTO_SIZE + 1, 0);
+        oversized.extend(format!("\r\n--{boundary}--\r\n").bytes());
+        req.body = oversized;
+        assert!(call(&granted, &req).starts_with("Status: 413"));
         let mut date = Req::test("POST", "/photos/i/1/date", "month=2022-03");
         assert!(call(&granted, &date).starts_with("Status: 400"));
         date.requested_with = "1".into();

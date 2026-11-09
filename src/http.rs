@@ -2,7 +2,159 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 
 const MAX_BODY: u64 = 64 * 1024;
-pub const MAX_PHOTO_BODY: u64 = 25 * 1024 * 1024;
+pub const MAX_PHOTO_SIZE: usize = 25 * 1024 * 1024;
+const MAX_PHOTO_BODY: u64 = MAX_PHOTO_SIZE as u64 + 64 * 1024;
+
+fn boundary_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'\'' | b'(' | b')' | b'+' | b'_' | b',' | b'-' | b'.' | b'/' | b':' | b'=' | b'?'
+        )
+}
+
+fn multipart_boundary(content_type: &str) -> Option<&str> {
+    let mut parameters = content_type.split(';');
+    if !parameters
+        .next()?
+        .trim()
+        .eq_ignore_ascii_case("multipart/form-data")
+    {
+        return None;
+    }
+
+    let mut boundary = None;
+    for parameter in parameters {
+        let (name, value) = parameter.trim().split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            continue;
+        }
+        if boundary.is_some() {
+            return None;
+        }
+
+        let value = value.trim();
+        let value = if value.starts_with('"') || value.ends_with('"') {
+            value.strip_prefix('"')?.strip_suffix('"')?
+        } else {
+            value
+        };
+        if value.is_empty() || value.len() > 70 || !value.bytes().all(boundary_byte) {
+            return None;
+        }
+        boundary = Some(value);
+    }
+    boundary
+}
+
+fn split_header_parameters(value: &str) -> Option<Vec<&str>> {
+    let mut parameters = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in value.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b';' if !quoted => {
+                parameters.push(&value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if quoted || escaped {
+        return None;
+    }
+    parameters.push(&value[start..]);
+    Some(parameters)
+}
+
+fn is_photo_file_disposition(disposition: &str) -> bool {
+    let Some(parameters) = split_header_parameters(disposition) else {
+        return false;
+    };
+    let mut parameters = parameters.into_iter();
+    if !parameters
+        .next()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("form-data"))
+    {
+        return false;
+    }
+
+    let (mut photo_name, mut filename) = (false, false);
+    for parameter in parameters {
+        let Some((name, value)) = parameter.trim().split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.trim().eq_ignore_ascii_case("name") {
+            if photo_name
+                || value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) != Some("photo")
+            {
+                return false;
+            }
+            photo_name = true;
+        } else if name.trim().eq_ignore_ascii_case("filename") {
+            if filename || value.is_empty() || value == "\"\"" {
+                return false;
+            }
+            filename = true;
+        }
+    }
+    photo_name && filename
+}
+
+pub fn multipart_upload_file<'a>(body: &'a [u8], content_type: &str) -> Option<&'a [u8]> {
+    let boundary = multipart_boundary(content_type)?;
+    let mut opening = format!("--{boundary}").into_bytes();
+    opening.extend_from_slice(b"\r\n");
+    if !body.starts_with(&opening) {
+        return None;
+    }
+
+    let header_start = opening.len();
+    let header_end = body[header_start..]
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?
+        + header_start;
+    let headers = std::str::from_utf8(&body[header_start..header_end]).ok()?;
+    let disposition = headers.lines().find_map(|header| {
+        let (name, value) = header.split_once(':')?;
+        name.eq_ignore_ascii_case("content-disposition")
+            .then_some(value.trim())
+    })?;
+    if !is_photo_file_disposition(disposition) {
+        return None;
+    }
+
+    let data_start = header_end + 4;
+    let data = &body[data_start..];
+    let delimiter = format!("\r\n--{boundary}");
+    let mut offset = 0;
+    loop {
+        let marker = offset
+            + data[offset..]
+                .windows(delimiter.len())
+                .position(|window| window == delimiter.as_bytes())?;
+        let suffix_start = marker + delimiter.len();
+        let suffix = &data[suffix_start..];
+        if let Some(epilogue) = suffix.strip_prefix(b"--") {
+            if epilogue.is_empty() || epilogue == b"\r\n" {
+                return Some(&data[..marker]);
+            }
+            return None;
+        }
+        if suffix.starts_with(b"\r\n") {
+            return None;
+        }
+        offset = suffix_start;
+    }
+}
 
 fn read_body(reader: impl Read, limit: u64) -> (Vec<u8>, Option<u16>) {
     let mut body = Vec::new();
@@ -226,6 +378,64 @@ mod tests {
     fn body_limit_reports_truncation() {
         assert_eq!(read_body(&b"abc"[..], 3), (b"abc".to_vec(), None));
         assert_eq!(read_body(&b"abcd"[..], 3).1, Some(413));
+    }
+
+    #[test]
+    fn multipart_upload_extracts_binary_photo() {
+        let boundary = "photo-boundary";
+        let image = [0xff, 0, b'a', b'\r', b'\n', 0x80];
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"holiday; name=beach.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&image);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        assert_eq!(
+            multipart_upload_file(&body, &format!("multipart/form-data; boundary={boundary}")),
+            Some(image.as_slice())
+        );
+    }
+
+    #[test]
+    fn multipart_upload_rejects_non_photo_and_bad_content_type() {
+        let boundary = "photo-boundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"other\"; filename=\"photo.jpg\"\r\n\r\nphoto\r\n--{boundary}--\r\n"
+        );
+        assert_eq!(
+            multipart_upload_file(
+                body.as_bytes(),
+                &format!("multipart/form-data; boundary={boundary}")
+            ),
+            None
+        );
+        assert_eq!(
+            multipart_upload_file(body.as_bytes(), "application/octet-stream"),
+            None
+        );
+
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n\r\nphoto\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"extra\"\r\n\r\nvalue\r\n--{boundary}--\r\n"
+        );
+        assert_eq!(
+            multipart_upload_file(
+                body.as_bytes(),
+                &format!("multipart/form-data; boundary={boundary}")
+            ),
+            None
+        );
+
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n\r\nphoto\r\n--{boundary}--\r\nepilogue\r\n--{boundary}--\r\n"
+        );
+        assert_eq!(
+            multipart_upload_file(
+                body.as_bytes(),
+                &format!("multipart/form-data; boundary={boundary}")
+            ),
+            None
+        );
     }
 
     #[test]
