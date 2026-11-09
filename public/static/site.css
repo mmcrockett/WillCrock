@@ -397,12 +397,66 @@ body {
   background: rgba(0, 0, 0, 0.55);
 }
 
+.photo-tag-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.photo-tag-add {
+  display: flex;
+  min-width: 0;
+  gap: 0.35rem;
+}
+
+.photo-tag-add .form-control {
+  width: 9rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.photo-tag-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .photo-tag-options {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   max-height: 50vh;
   overflow: auto;
+}
+
+.photo-tag-option {
+  cursor: pointer;
+}
+
+.photo-tag-option span {
+  display: inline-block;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid #adb5bd;
+  border-radius: 999px;
+  background: #fff;
+  color: #343a40;
+}
+
+.photo-tag-option:hover span {
+  border-color: var(--crest-navy);
+}
+
+.photo-tag-option input:checked + span {
+  border-color: var(--crest-navy);
+  background: var(--crest-navy);
+  color: #fff;
+}
+
+.photo-tag-option input:focus-visible + span {
+  outline: 0.2rem solid rgba(30, 58, 138, 0.35);
+  outline-offset: 0.1rem;
 }
 
 .photo-thumb {

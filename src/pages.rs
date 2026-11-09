@@ -1034,8 +1034,8 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
         .iter()
         .map(|tag| {
             format!(
-                "<label><input class=\"form-check-input me-1\" type=\"checkbox\" \
-                 name=\"known_tag\" value=\"{}\">{}</label>",
+                "<label class=\"photo-tag-option\"><input class=\"visually-hidden\" \
+                 type=\"checkbox\" name=\"known_tag\" value=\"{}\"><span>{}</span></label>",
                 esc(tag),
                 esc(tag)
             )
@@ -1117,12 +1117,13 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
              </dialog>\
              <dialog class=\"photo-tag-picker\" aria-labelledby=\"photo-tag-title\">\
              <form method=\"post\" data-tag-form>\
-             <h2 class=\"h5\" id=\"photo-tag-title\">Edit photo tags</h2>\
-             <fieldset><legend class=\"h6\">Known tags</legend>\
+             <div class=\"photo-tag-header\"><h2 class=\"h5 mb-0\" id=\"photo-tag-title\">Tags</h2>\
+             <div class=\"photo-tag-add\"><input class=\"form-control\" id=\"new-photo-tag\" \
+             maxlength=\"50\" placeholder=\"Add tag\" aria-label=\"Add tag\">\
+             <button class=\"btn btn-outline-secondary btn-sm\" type=\"button\" data-tag-add \
+             aria-label=\"Add tag\">+</button></div></div>\
+             <fieldset class=\"photo-tag-fieldset\" aria-labelledby=\"photo-tag-title\">\
              <div class=\"photo-tag-options\">{}</div></fieldset>\
-             <label class=\"form-label mt-3\" for=\"new-photo-tag\">Add a new tag</label>\
-             <input class=\"form-control\" id=\"new-photo-tag\" name=\"new_tag\" maxlength=\"50\" \
-             placeholder=\"New tag\">\
              <input type=\"hidden\" name=\"tags\">\
              <input type=\"hidden\" name=\"return_to\">\
              <div class=\"d-flex justify-content-end gap-2 mt-3\">\
@@ -1771,7 +1772,10 @@ mod tests {
         assert!(html.contains("data-tags=\"mike\""));
         assert!(html.contains("aria-label=\"Edit tags for &lt;x&gt;.jpg\""));
         assert!(html.contains("name=\"known_tag\" value=\"mike\""));
-        assert!(html.contains("name=\"new_tag\""));
+        assert!(html.contains(">Tags</h2>"));
+        assert!(html.contains("placeholder=\"Add tag\""));
+        assert!(html.contains("data-tag-add"));
+        assert!(!html.contains("Known tags"));
         assert!(html.contains("Showing 1-1 of 3"));
     }
 
