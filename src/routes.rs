@@ -1160,6 +1160,21 @@ mod tests {
         );
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
         assert!(html.contains("No recipes yet."));
+
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes", "name=Fresh+soup").0,
+            303
+        );
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1", "name=Changed+soup").0,
+            404
+        );
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1/delete", "").0,
+            404
+        );
+        let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert!(html.contains("value=\"Fresh soup\""));
     }
 
     #[test]

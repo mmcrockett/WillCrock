@@ -164,7 +164,7 @@ CREATE TABLE shared_album_photos (
 ",
     "
 CREATE TABLE recipes (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL CHECK (length(trim(name)) > 0)
 );
 CREATE UNIQUE INDEX recipes_name ON recipes(name COLLATE NOCASE);
