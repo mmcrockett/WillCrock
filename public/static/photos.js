@@ -26,7 +26,10 @@
     });
     tagPicker.querySelector("[data-tag-close]").addEventListener("click", () => tagPicker.close());
     tagPicker.addEventListener("click", (event) => {
-      if (event.target === tagPicker) tagPicker.close();
+      if (event.target !== tagPicker) return;
+      const bounds = tagPicker.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right ||
+          event.clientY < bounds.top || event.clientY > bounds.bottom) tagPicker.close();
     });
   }
 
