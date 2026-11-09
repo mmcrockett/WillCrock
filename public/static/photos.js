@@ -21,7 +21,7 @@
       });
     });
 
-    const addTags = () => {
+    const addTags = (focusInput = true) => {
       const tags = newTagInput.value.split(",").map((tag) => tag.trim().toLowerCase()).filter(Boolean);
       tags.forEach((tag) => {
         const existing = options().find((option) => option.value.toLowerCase() === tag);
@@ -44,17 +44,17 @@
         tagOptions.append(label);
       });
       newTagInput.value = "";
-      newTagInput.focus();
+      if (focusInput) newTagInput.focus();
     };
 
     tagPicker.querySelector("[data-tag-add]").addEventListener("click", addTags);
     newTagInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        addTags();
-      }
+      if (event.isComposing || event.key !== "Enter") return;
+      event.preventDefault();
+      addTags();
     });
     form.addEventListener("submit", () => {
+      if (newTagInput.value.trim()) addTags(false);
       const selected = options().filter((option) => option.checked).map((option) => option.value);
       tagsInput.value = selected.join(", ");
     });
