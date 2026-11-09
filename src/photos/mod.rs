@@ -7,6 +7,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+pub mod albums;
 mod images;
 mod upload;
 pub use images::{image_file, ImageKind};
@@ -233,7 +234,12 @@ pub fn run(args: &[String]) {
         Some("scan") => scan_cmd(),
         Some("unsynced") => unsynced_cmd(),
         Some("mark-synced") => mark_synced_cmd(),
-        _ => cli::fail("usage: willcrock photos scan|unsynced|mark-synced"),
+        Some("prune-albums") => {
+            let (_, conn) = open_db();
+            let n = albums::prune(&conn, cli::now()).unwrap_or_else(|e| cli::fail(e));
+            println!("removed {n} expired albums");
+        }
+        _ => cli::fail("usage: willcrock photos scan|unsynced|mark-synced|prune-albums"),
     }
 }
 

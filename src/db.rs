@@ -145,6 +145,23 @@ INSERT OR IGNORE INTO photo_tags (photo_id, tag_id)
   JOIN tags t ON t.name IN (substr(p.taken_on, 1, 4), substr(p.taken_on, 1, 7))
   WHERE p.taken_on IS NOT NULL;
 ",
+    "
+CREATE TABLE shared_albums (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  token TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL CHECK (expires_at > created_at)
+);
+CREATE INDEX shared_albums_expiry ON shared_albums(expires_at);
+CREATE TABLE shared_album_photos (
+  album_id INTEGER NOT NULL REFERENCES shared_albums(id) ON DELETE CASCADE,
+  photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (album_id, photo_id)
+);
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {

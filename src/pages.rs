@@ -992,6 +992,8 @@ pub fn photos(user: &User, features: Features, summary: Option<&photos::Summary>
                  <div id=\"photo-upload-results\" class=\"mt-3\" aria-live=\"polite\"></div>\
                  </div></div><script src=\"{}\" defer></script>\
                  <p class=\"text-body-secondary small\">{} photos{note}.</p>\
+                 <p><a class=\"btn btn-outline-secondary\" href=\"/photos/all\">All photos</a> \
+                 <a class=\"btn btn-outline-secondary\" href=\"/photos/albums\">Shareable albums</a></p>\
                  <h2 class=\"h6\">Years</h2><div>{}</div>{others}",
                 asset("/static/photo-upload.js"),
                 s.total,
@@ -1016,11 +1018,12 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
         crumbs.push_str(&format!(" / <a href=\"/photos/t/{path}\">{}</a>", esc(t)));
         path.push('/');
     }
-    let return_to = format!(
-        "/photos/t/{}?page={}",
-        path.trim_end_matches('/'),
-        view.page
-    );
+    let base = if view.tags.is_empty() {
+        "/photos/all".to_string()
+    } else {
+        format!("/photos/t/{}", path.trim_end_matches('/'))
+    };
+    let return_to = format!("{base}?page={}", view.page);
     let subtags = if view.subtags.is_empty() {
         String::new()
     } else {
@@ -1046,46 +1049,8 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
     } else {
         known_tag_options
     };
-    let tiles: String = view
-        .photos
-        .iter()
-        .map(|p| {
-            let filename = p.path.rsplit('/').next().unwrap_or(&p.path);
-            let tag_button = format!(
-                "<button class=\"photo-tag-button\" type=\"button\" data-tag-picker \
-                 data-action=\"/photos/i/{}/tags\" data-return-to=\"{}\" data-tags=\"{}\" \
-                 aria-label=\"Edit tags for {}\" title=\"Edit tags\">+</button>",
-                p.id,
-                esc(&return_to),
-                esc(&p.tags.join(", ")),
-                esc(filename),
-            );
-            if p.can_preview() {
-                format!(
-                    "<div class=\"photo-card\"><a class=\"photo-tile\" href=\"/photos/i/{id}/preview\" data-photo \
-                     data-original=\"/photos/i/{id}/original\" data-caption=\"{caption}\">\
-                     <span class=\"photo-thumb\"><img src=\"/photos/i/{id}/thumb\" \
-                     alt=\"{caption}\" loading=\"lazy\" decoding=\"async\">\
-                     <span class=\"photo-load-error\" hidden>Preview unavailable</span></span>\
-                     <span class=\"photo-caption\">{caption}</span></a>{tag_button}</div>",
-                    id = p.id,
-                    caption = esc(filename),
-                    tag_button = tag_button,
-                )
-            } else {
-                format!(
-                    "<div class=\"photo-card\"><a class=\"photo-tile\" href=\"/photos/i/{id}/original\">\
-                     <span class=\"photo-thumb photo-unsupported\">HEIC photo<br>Download to view</span>\
-                     <span class=\"photo-caption\">{caption}</span></a>{tag_button}</div>",
-                    id = p.id,
-                    caption = esc(filename),
-                    tag_button = tag_button,
-                )
-            }
-        })
-        .collect();
+    let tiles = photo_tiles(&view.photos, "/photos/i", Some(&return_to));
     let mut pagination = String::new();
-    let base = format!("/photos/t/{}", path.trim_end_matches('/'));
     if view.page > 1 {
         pagination.push_str(&format!(
             "<a class=\"btn btn-outline-secondary\" href=\"{base}?page={}\">Previous</a>",
@@ -1102,19 +1067,9 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
         "<div class=\"card shadow-sm\"><div class=\"card-body\">No photos.</div></div>".to_string()
     } else {
         format!(
-            "<div class=\"photo-grid\">{tiles}</div>\
+            "{share_form}<div class=\"photo-grid\">{tiles}</div>\
              <nav class=\"d-flex gap-2 my-3\" aria-label=\"Photo pages\">{pagination}</nav>\
-             <p class=\"text-body-secondary small\">Showing {}-{} of {}.</p>\
-             <dialog class=\"photo-viewer\" aria-label=\"Photo viewer\">\
-             <div class=\"photo-viewer-toolbar\">\
-             <button type=\"button\" class=\"btn btn-light\" data-photo-prev>Previous</button>\
-             <button type=\"button\" class=\"btn btn-light\" data-photo-next>Next</button>\
-             <a class=\"btn btn-light\" data-photo-download>Download original</a>\
-             <button type=\"button\" class=\"btn btn-light\" data-photo-close>Close</button></div>\
-             <p class=\"photo-viewer-caption\" aria-live=\"polite\"></p>\
-             <p class=\"photo-viewer-error\" role=\"status\" hidden>Could not load this photo. Try downloading the original.</p>\
-             <img class=\"photo-viewer-image\" alt=\"\">\
-             </dialog>\
+             <p class=\"text-body-secondary small\">Showing {}-{} of {}.</p>{viewer}\
              <dialog class=\"photo-tag-picker\" aria-labelledby=\"photo-tag-title\">\
              <form method=\"post\" data-tag-form>\
              <div class=\"photo-tag-header\"><h2 class=\"h5 mb-0\" id=\"photo-tag-title\">Tags</h2>\
@@ -1123,18 +1078,19 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
              <button class=\"btn btn-outline-secondary btn-sm\" type=\"button\" data-tag-add \
              aria-label=\"Add tag\">+</button></div></div>\
              <fieldset class=\"photo-tag-fieldset\" aria-labelledby=\"photo-tag-title\">\
-             <div class=\"photo-tag-options\">{}</div></fieldset>\
+             <div class=\"photo-tag-options\">{known_tag_options}</div></fieldset>\
              <input type=\"hidden\" name=\"tags\">\
              <input type=\"hidden\" name=\"return_to\">\
              <div class=\"d-flex justify-content-end gap-2 mt-3\">\
              <button class=\"btn btn-outline-secondary\" type=\"button\" data-tag-close>Cancel</button>\
              <button class=\"btn btn-primary\" type=\"submit\">Save tags</button></div>\
-             </form></dialog><script src=\"{}\" defer></script>",
+             </form></dialog>",
             (view.page - 1) * photos::TAG_VIEW_LIMIT + 1,
             (view.page - 1) * photos::TAG_VIEW_LIMIT + view.photos.len() as i64,
             view.total,
-            known_tag_options,
-            asset("/static/photos.js"),
+            known_tag_options = known_tag_options,
+            share_form = album_form(),
+            viewer = photo_viewer(),
         )
     };
     app_page(
@@ -1147,6 +1103,140 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
              {subtags}{list}",
             page_title("Photos"),
             view.total
+        ),
+    )
+}
+
+fn photo_tiles(photos: &[photos::Photo], prefix: &str, return_to: Option<&str>) -> String {
+    photos
+        .iter()
+        .map(|p| {
+            let filename = p.path.rsplit('/').next().unwrap_or(&p.path);
+            let controls = return_to
+                .map(|return_to| {
+                    format!(
+                        "<label class=\"form-check m-2\"><input class=\"form-check-input\" type=\"checkbox\" \
+                         name=\"photo_{id}\" value=\"1\" form=\"share-album\" data-share-photo=\"{id}\"> \
+                         Select for album</label>\
+                         <button class=\"photo-tag-button\" type=\"button\" data-tag-picker \
+                         data-action=\"/photos/i/{id}/tags\" data-return-to=\"{return_to}\" data-tags=\"{tags}\" \
+                         aria-label=\"Edit tags for {caption}\" title=\"Edit tags\">+</button>",
+                        id = p.id,
+                        return_to = esc(return_to),
+                        tags = esc(&p.tags.join(", ")),
+                        caption = esc(filename),
+                    )
+                })
+                .unwrap_or_default();
+            if p.can_preview() {
+                format!(
+                    "<div class=\"photo-card\"><a class=\"photo-tile\" href=\"{prefix}/{id}/preview\" data-photo \
+                     data-original=\"{prefix}/{id}/original\" data-caption=\"{caption}\">\
+                     <span class=\"photo-thumb\"><img src=\"{prefix}/{id}/thumb\" \
+                     alt=\"{caption}\" loading=\"lazy\" decoding=\"async\">\
+                     <span class=\"photo-load-error\" hidden>Preview unavailable</span></span>\
+                     <span class=\"photo-caption\">{caption}</span></a>{controls}</div>",
+                    id = p.id,
+                    caption = esc(filename),
+                )
+            } else {
+                format!(
+                    "<div class=\"photo-card\"><a class=\"photo-tile\" href=\"{prefix}/{id}/original\">\
+                     <span class=\"photo-thumb photo-unsupported\">HEIC photo<br>Download to view</span>\
+                     <span class=\"photo-caption\">{caption}</span></a>{controls}</div>",
+                    id = p.id,
+                    caption = esc(filename),
+                )
+            }
+        })
+        .collect()
+}
+
+fn photo_viewer() -> String {
+    format!(
+        "<dialog class=\"photo-viewer\" aria-label=\"Photo viewer\">\
+             <div class=\"photo-viewer-toolbar\">\
+             <button type=\"button\" class=\"btn btn-light\" data-photo-prev>Previous</button>\
+             <button type=\"button\" class=\"btn btn-light\" data-photo-next>Next</button>\
+             <a class=\"btn btn-light\" data-photo-download>Download original</a>\
+             <button type=\"button\" class=\"btn btn-light\" data-photo-close>Close</button></div>\
+             <p class=\"photo-viewer-caption\" aria-live=\"polite\"></p>\
+             <p class=\"photo-viewer-error\" role=\"status\" hidden>Could not load this photo. Try downloading the original.</p>\
+             <img class=\"photo-viewer-image\" alt=\"\">\
+             </dialog><script src=\"{}\" defer></script>",
+            asset("/static/photos.js"),
+        )
+}
+
+fn album_form() -> String {
+    "<form id=\"share-album\" method=\"post\" action=\"/photos/albums\" class=\"card card-body mb-3\">\
+     <h2 class=\"h6\">Create shareable album</h2>\
+     <p class=\"small\">Anyone with the link can view and download the selected photos. \
+     Expiration removes the album, not the original photos.</p>\
+     <div class=\"row g-2 align-items-end\">\
+     <div class=\"col-12 col-md\"><label class=\"form-label\" for=\"album-title\">Album name (optional)</label>\
+     <input class=\"form-control\" id=\"album-title\" name=\"title\" maxlength=\"100\"></div>\
+     <div class=\"col-6 col-md-auto\"><label class=\"form-label\" for=\"album-days\">Expires in days</label>\
+     <input class=\"form-control\" id=\"album-days\" name=\"days\" type=\"number\" min=\"1\" max=\"180\" value=\"30\" required></div>\
+     <div class=\"col-auto\"><button class=\"btn btn-primary\">Create album</button></div></div>\
+     <div class=\"mt-2\" data-share-selection hidden><span data-share-count></span> photos selected. \
+     <button class=\"btn btn-sm btn-outline-secondary\" type=\"button\" data-share-clear>Clear selection</button></div>\
+     </form>".into()
+}
+
+fn album_expiry(album: &photos::albums::Album) -> String {
+    jiff::Timestamp::from_second(album.expires_at)
+        .expect("album expiry is a valid timestamp")
+        .strftime("%Y-%m-%d %H:%M UTC")
+        .to_string()
+}
+
+pub fn photo_albums(
+    user: &User,
+    features: Features,
+    albums: &[photos::albums::Album],
+    error: Option<&str>,
+) -> String {
+    let rows: String = albums.iter().map(|a| {
+        let url = format!("/s/photos/{}", a.token);
+        format!(
+            "<div class=\"card card-body mb-3\"><h2 class=\"h5\"><a href=\"{url}\">{}</a></h2>\
+             <p class=\"small\">Expires {}</p>\
+             <input class=\"form-control mb-2\" readonly value=\"{url}\" aria-label=\"Shareable link\" data-share-link>\
+             <form method=\"post\" action=\"/photos/albums/{}/delete\" \
+             onsubmit=\"return confirm('Remove this album and revoke its link?')\">\
+             <button class=\"btn btn-sm btn-outline-danger\">Remove album</button></form></div>",
+            esc(&a.title), album_expiry(a), a.id
+        )
+    }).collect();
+    app_page(
+        "Shareable albums",
+        "photos",
+        user,
+        features,
+        &format!(
+            "{}{}<p><a href=\"/photos/all\">Select photos to create an album</a> \
+             | <a href=\"/photos\">Back to photos</a></p>{rows}\
+             <script src=\"{}\" defer></script>",
+            page_title("Shareable albums"),
+            alert(error),
+            asset("/static/photos.js"),
+        ),
+    )
+}
+
+pub fn shared_photo_album(album: &photos::albums::Album, photos: &[photos::Photo]) -> String {
+    let prefix = format!("/s/photos/{}/i", album.token);
+    shell(
+        &album.title,
+        &format!(
+            "<main class=\"container py-4\">{}<p class=\"small\">Expires {}. \
+             Anyone with this link can view and download these photos.</p>\
+             <div class=\"photo-grid\">{}</div>{}</main>",
+            page_title(&album.title),
+            album_expiry(album),
+            photo_tiles(photos, &prefix, None),
+            photo_viewer()
         ),
     )
 }
@@ -1776,6 +1866,8 @@ mod tests {
         assert!(html.contains("placeholder=\"Add tag\""));
         assert!(html.contains("data-tag-add"));
         assert!(!html.contains("Known tags"));
+        assert!(html.contains("data-share-photo=\"7\""));
+        assert!(html.contains("name=\"days\" type=\"number\" min=\"1\" max=\"180\" value=\"30\""));
         assert!(html.contains("Showing 1-1 of 3"));
     }
 

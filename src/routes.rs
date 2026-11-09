@@ -22,10 +22,14 @@ pub fn handle(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> Resp {
 }
 
 fn dispatch(conn: &Connection, cfg: &Config, req: &Req, now: i64) -> rusqlite::Result<Resp> {
+    photos::albums::prune(conn, now)?;
     let segs: Vec<&str> = req.path.split('/').filter(|s| !s.is_empty()).collect();
     let method = req.method.as_str();
 
     match (method, segs.as_slice()) {
+        ("GET", ["s", "photos", share, rest @ ..]) => {
+            return shared_photos(conn, cfg, share, rest, now);
+        }
         ("GET", ["login"]) => return Ok(Resp::html(200, pages::login(None))),
         ("POST", ["login"]) => return post_login(conn, cfg, req, now),
         ("GET", ["login", "code"]) => {
@@ -96,6 +100,11 @@ fn authed(
                 pages::photos(user, features(cfg), summary.as_ref()),
             ))
         }
+        (_, ["photos", "albums", rest @ ..])
+            if user.can(Feature::Photos) && cfg.photos.is_some() =>
+        {
+            photo_albums(conn, cfg, req, user, rest, now)
+        }
         ("POST", ["photos", "upload"]) if user.can(Feature::Photos) && cfg.photos.is_some() => {
             if req.requested_with != "1" || req.content_type != "application/octet-stream" {
                 return Ok(Resp::json(
@@ -136,9 +145,17 @@ fn authed(
                 Err(error) => photo_upload_error(error),
             })
         }
-        ("GET", ["photos", "t", tags @ ..])
-            if user.can(Feature::Photos) && cfg.photos.is_some() && !tags.is_empty() =>
+        ("GET", ["photos", "all"]) | ("GET", ["photos", "t", ..])
+            if user.can(Feature::Photos) && cfg.photos.is_some() =>
         {
+            let tags = if segs == ["photos", "all"] {
+                &[][..]
+            } else {
+                &segs[2..]
+            };
+            if segs != ["photos", "all"] && tags.is_empty() {
+                return Ok(Resp::html(404, pages::not_found()));
+            }
             let mut names: Vec<String> = Vec::new();
             for t in tags {
                 match photos::normalize_tag(t) {
@@ -268,6 +285,91 @@ fn photo_upload_error(error: photos::UploadError) -> Resp {
             )
         }
     }
+}
+
+fn photo_albums(
+    conn: &Connection,
+    cfg: &Config,
+    req: &Req,
+    user: &User,
+    rest: &[&str],
+    now: i64,
+) -> rusqlite::Result<Resp> {
+    let index = |status, error: Option<&str>| {
+        Ok(Resp::html(
+            status,
+            pages::photo_albums(
+                user,
+                features(cfg),
+                &photos::albums::list(conn, user.id, now)?,
+                error,
+            ),
+        ))
+    };
+    match (req.method.as_str(), rest) {
+        ("GET", []) => index(200, None),
+        ("POST", []) => {
+            let ids = req.form.get("photo_ids").cloned().unwrap_or_else(|| {
+                req.form
+                    .keys()
+                    .filter_map(|k| k.strip_prefix("photo_"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            });
+            let title = req.form.get("title").map(String::as_str).unwrap_or("");
+            let days = req.form.get("days").map(String::as_str);
+            let input = match photos::albums::parse(title, days, &ids) {
+                Ok(input) => input,
+                Err(e) => return index(400, Some(&e)),
+            };
+            match photos::albums::create(conn, user.id, &input, now)? {
+                Some(_) => Ok(Resp::redirect("/photos/albums?created=1")),
+                None => index(400, Some("One or more selected photos are no longer available. Clear the selection and try again.")),
+            }
+        }
+        ("POST", [id, "delete"]) => match id.parse::<i64>() {
+            Ok(id) if photos::albums::delete(conn, id, user.id)? > 0 => {
+                Ok(Resp::redirect("/photos/albums"))
+            }
+            _ => Ok(Resp::html(404, pages::not_found())),
+        },
+        _ => Ok(Resp::html(404, pages::not_found())),
+    }
+}
+
+fn shared_photos(
+    conn: &Connection,
+    cfg: &Config,
+    token: &str,
+    rest: &[&str],
+    now: i64,
+) -> rusqlite::Result<Resp> {
+    let not_found = || Ok(Resp::html(404, pages::not_found()));
+    if cfg.photos.is_none() {
+        return not_found();
+    }
+    let Some(album) = photos::albums::get(conn, token, now)? else {
+        return not_found();
+    };
+    let resp = match rest {
+        [] => Resp::html(
+            200,
+            pages::shared_photo_album(&album, &photos::albums::photos(conn, album.id)?),
+        ),
+        ["i", id, kind @ ("thumb" | "preview" | "original")] => {
+            let Ok(photo_id) = id.parse::<i64>() else {
+                return not_found();
+            };
+            if !photos::albums::contains(conn, album.id, photo_id)? {
+                return not_found();
+            }
+            photo_image(conn, cfg, id, kind)?
+        }
+        _ => return not_found(),
+    };
+    Ok(resp
+        .header("Referrer-Policy", "no-referrer".into())
+        .header("X-Robots-Tag", "noindex, nofollow".into()))
 }
 
 fn photo_image(conn: &Connection, cfg: &Config, id: &str, kind: &str) -> rusqlite::Result<Resp> {
@@ -766,6 +868,118 @@ mod tests {
         date.requested_with = "1".into();
         assert!(call(&denied, &date).starts_with("Status: 404"));
         assert!(call(&granted, &date).contains("\"date\":\"2022-03\""));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_albums_create_public_links_and_revoke_only_album_photos() {
+        let root =
+            std::env::temp_dir().join(format!("willcrock-shared-album-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&root).unwrap();
+        for filename in ["one.png", "two.png", "private.png"] {
+            image::RgbImage::new(40, 20)
+                .save(root.join(filename))
+                .unwrap();
+        }
+        let mut conn = db::open_memory();
+        auth::add_user(&conn, "sam@example.com", None, false, 0).unwrap();
+        photos::scan(&mut conn, &root, 100).unwrap();
+        let id = |path| {
+            conn.query_row("SELECT id FROM photos WHERE path = ?1", [path], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let (one, two, private) = (id("one.png"), id("two.png"), id("private.png"));
+        let mut config = cfg();
+        config.photos = Some(crate::config::Photos {
+            dir: root.to_str().unwrap().into(),
+        });
+        let owner = user(vec![Feature::Photos]);
+        let request = |u: &User, method: &str, path: &str, form: &str| {
+            let req = Req::test(method, path, form);
+            let segs: Vec<_> = path.split('/').filter(|s| !s.is_empty()).collect();
+            let resp = authed(&conn, &config, &req, &segs, u, "tok", 100).unwrap();
+            let mut out = Vec::new();
+            resp.write_to(&mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let create = format!("title=Family&photo_ids={one},{two}");
+        assert!(
+            request(&user(vec![]), "POST", "/photos/albums", &create).starts_with("Status: 404")
+        );
+        for invalid in [
+            format!("days=0&photo_ids={one}"),
+            format!("days=181&photo_ids={one}"),
+            "days=30".into(),
+            "photo_ids=999999".into(),
+        ] {
+            assert!(request(&owner, "POST", "/photos/albums", &invalid).starts_with("Status: 400"));
+        }
+        let all = request(&owner, "GET", "/photos/all", "");
+        assert!(all.contains(&format!("data-share-photo=\"{private}\"")));
+        assert!(request(&owner, "POST", "/photos/albums", &create)
+            .contains("Location: /photos/albums?created=1"));
+        let album = photos::albums::list(&conn, owner.id, 100)
+            .unwrap()
+            .remove(0);
+        assert_eq!(album.expires_at, 100 + 30 * 86400);
+        let url = format!("/s/photos/{}", album.token);
+        assert!(request(&owner, "GET", "/photos/albums", "").contains(&url));
+        let public = |path: &str, now| {
+            let mut out = Vec::new();
+            handle(&conn, &config, &Req::test("GET", path, ""), now)
+                .write_to(&mut out)
+                .unwrap();
+            out
+        };
+        let html = String::from_utf8(public(&url, 100)).unwrap();
+        assert!(html.starts_with("Status: 200"));
+        assert!(html.contains("Family"));
+        assert!(html.contains(&format!("{url}/i/{one}/preview")));
+        assert!(!html.contains("photo-tags"));
+        assert!(!html.contains("/photos/i/"));
+        assert!(!html.contains("private.png"));
+        assert!(html.contains("Referrer-Policy: no-referrer"));
+        for kind in ["thumb", "preview", "original"] {
+            assert!(
+                public(&format!("{url}/i/{one}/{kind}"), album.expires_at - 1)
+                    .starts_with(b"Status: 200")
+            );
+            assert!(public(&format!("{url}/i/{private}/{kind}"), 100).starts_with(b"Status: 404"));
+            assert!(
+                public(&format!("/s/photos/wrong/i/{one}/{kind}"), 100).starts_with(b"Status: 404")
+            );
+        }
+        let original = public(&format!("{url}/i/{two}/original"), 100);
+        let split = original.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        assert_eq!(
+            &original[split + 4..],
+            std::fs::read(root.join("two.png")).unwrap()
+        );
+        assert!(public(&url, album.expires_at).starts_with(b"Status: 404"));
+        for kind in ["thumb", "preview", "original"] {
+            assert!(public(&format!("{url}/i/{one}/{kind}"), album.expires_at)
+                .starts_with(b"Status: 404"));
+        }
+        assert!(photos::albums::list(&conn, owner.id, 100)
+            .unwrap()
+            .is_empty());
+        assert!(root.join("one.png").exists());
+        assert_eq!(photos::summary(&conn).unwrap().total, 3);
+
+        let form = format!("days=1&photo_{one}=1");
+        assert!(request(&owner, "POST", "/photos/albums", &form).starts_with("Status: 303"));
+        let album = photos::albums::list(&conn, owner.id, 100)
+            .unwrap()
+            .remove(0);
+        let delete = format!("/photos/albums/{}/delete", album.id);
+        let mut other = user(vec![Feature::Photos]);
+        other.id = 2;
+        assert!(request(&other, "POST", &delete, "").starts_with("Status: 404"));
+        assert!(request(&owner, "POST", &delete, "").starts_with("Status: 303"));
+        assert!(public(&format!("/s/photos/{}", album.token), 100).starts_with(b"Status: 404"));
+        assert!(root.join("one.png").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
