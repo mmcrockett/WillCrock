@@ -3,6 +3,7 @@ use crate::config::Quackr;
 use crate::photos;
 use crate::pickle::dashboard::{self, Dashboard};
 use crate::pickle::{slots, time as pickle_time};
+use crate::recipes::Recipe;
 use crate::sms::{self, Sms};
 use crate::trips::{self, Item, Kind, Trip};
 
@@ -929,15 +930,42 @@ pub fn trip_edit(
     )
 }
 
-pub fn placeholder(user: &User, features: Features, feature: Feature) -> String {
+pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Option<&str>) -> String {
+    let rows = if recipes.is_empty() {
+        "<p class=\"text-body-secondary mb-0\">No recipes yet.</p>".to_string()
+    } else {
+        format!(
+            "<ul class=\"list-unstyled mb-0\">{}</ul>",
+            recipes
+                .iter()
+                .map(|recipe| format!(
+                    "<li class=\"d-flex gap-2 align-items-center mb-2\">\
+                     <form method=\"post\" action=\"/recipes/{}\" class=\"d-flex gap-2 flex-grow-1\">\
+                     <input class=\"form-control\" name=\"name\" value=\"{}\" aria-label=\"Recipe name\" required>\
+                     <button class=\"btn btn-outline-secondary\">Save</button></form>\
+                     <form method=\"post\" action=\"/recipes/{}/delete\" onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"{}\">\
+                     <button class=\"btn btn-outline-danger\">Delete</button></form></li>",
+                    recipe.id,
+                    esc(&recipe.name),
+                    recipe.id,
+                    esc(&format!("Delete {}?", recipe.name)),
+                ))
+                .collect::<String>()
+        )
+    };
     app_page(
-        feature.label(),
-        feature.as_str(),
+        "Recipes",
+        "recipes",
         user,
         features,
         &format!(
-            "{}<div class=\"card shadow-sm\"><div class=\"card-body\">Coming soon.</div></div>",
-            page_title(feature.label())
+            "{}{}<div class=\"card shadow-sm mb-4\"><div class=\"card-body\">{}\
+             <form method=\"post\" action=\"/recipes\" class=\"row g-2 align-items-center\">\
+             <div class=\"col\"><input class=\"form-control\" name=\"name\" placeholder=\"Recipe name\" aria-label=\"Recipe name\" required></div>\
+             <div class=\"col-auto\"><button class=\"btn btn-primary\">Add recipe</button></div></form></div></div>",
+            page_title("Recipes"),
+            alert(error),
+            rows,
         ),
     )
 }
@@ -1689,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_links_follow_the_grant() {
+    fn feature_links_follow_the_grant() {
         let member = member_with(vec![Feature::Recipes]);
         let html = home(&member, Features::default());
         assert!(html.contains("href=\"/recipes\""));
@@ -1705,14 +1733,17 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_page_marks_its_link_active() {
-        let html = placeholder(
-            &user(1, "mike", true),
-            Features::default(),
-            Feature::Recipes,
-        );
-        assert!(html.contains("Coming soon."));
-        assert!(html.contains("side-link active\" href=\"/recipes\""));
+    fn recipes_page_lists_and_escapes_names_and_supports_basic_changes() {
+        let data = [Recipe {
+            id: 7,
+            name: "Tomato <soup>".into(),
+        }];
+        let html = recipes(&user(1, "mike", true), Features::default(), &data, None);
+        assert!(html.contains("value=\"Tomato &lt;soup&gt;\""));
+        assert!(!html.contains("value=\"Tomato <soup>\""));
+        assert!(html.contains("action=\"/recipes\""));
+        assert!(html.contains("action=\"/recipes/7\""));
+        assert!(html.contains("action=\"/recipes/7/delete\""));
     }
 
     fn sample_trip() -> Trip {

@@ -8,6 +8,7 @@ mod mail;
 mod pages;
 mod photos;
 mod pickle;
+mod recipes;
 mod routes;
 mod sms;
 mod trips;
