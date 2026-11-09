@@ -39,11 +39,30 @@ fn photo_format(bytes: &[u8]) -> Result<&'static str, UploadError> {
     }
 }
 
+fn meta_contains_idat(data: &[u8]) -> bool {
+    let mut at = 4;
+    let mut found = false;
+    while at < data.len() {
+        let Some(header) = data.get(at..at.saturating_add(8)) else {
+            return false;
+        };
+        let size = u32::from_be_bytes(header[..4].try_into().expect("four bytes")) as usize;
+        if size < 8 || size > data.len() - at {
+            return false;
+        }
+        if &header[4..8] == b"idat" && size > 8 {
+            found = true;
+        }
+        at += size;
+    }
+    found
+}
+
 fn is_heic(bytes: &[u8]) -> bool {
     let mut at: usize = 0;
     let mut ftyp = false;
     let mut meta = false;
-    let mut mdat = false;
+    let mut image_data = false;
     while let Some(header) = bytes.get(at..at.saturating_add(8)) {
         let size = u32::from_be_bytes(header[..4].try_into().expect("four bytes")) as usize;
         if size < 8 || size > bytes.len() - at {
@@ -62,13 +81,16 @@ fn is_heic(bytes: &[u8]) -> bool {
                                 matches!(brand, b"heic" | b"heix" | b"hevc" | b"hevx")
                             }));
             }
-            b"meta" => meta = true,
-            b"mdat" if !data.is_empty() => mdat = true,
+            b"meta" => {
+                meta = true;
+                image_data |= meta_contains_idat(data);
+            }
+            b"mdat" if !data.is_empty() => image_data = true,
             _ => {}
         }
         at += size;
     }
-    at == bytes.len() && ftyp && meta && mdat
+    at == bytes.len() && ftyp && meta && image_data
 }
 
 fn validate_image(bytes: &[u8], ext: &str) -> Result<(), UploadError> {
@@ -307,6 +329,12 @@ mod tests {
     fn heic_container_validation() {
         let heic = b"\0\0\0\x14ftypheic\0\0\0\0mif1\0\0\0\x0cmeta\0\0\0\0\0\0\0\x09mdat\x01";
         assert!(is_heic(heic));
+        let heic_with_idat =
+            b"\0\0\0\x14ftypheic\0\0\0\0mif1\0\0\0\x15meta\0\0\0\0\0\0\0\x09idat\x01";
+        assert!(is_heic(heic_with_idat));
+        let heic_with_empty_idat =
+            b"\0\0\0\x14ftypheic\0\0\0\0mif1\0\0\0\x14meta\0\0\0\0\0\0\0\x08idat";
+        assert!(!is_heic(heic_with_empty_idat));
         assert!(!is_heic(&heic[..heic.len() - 1]));
         assert!(!is_heic(b"\0\0\0\x10ftypheic\0\0\0\0"));
     }
