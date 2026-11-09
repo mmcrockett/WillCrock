@@ -217,7 +217,7 @@ fn authed(
             }
         }
         (_, ["recipes", rest @ ..]) if user.can(Feature::Recipes) => {
-            recipes_route(conn, cfg, req, user, rest)
+            recipes_route(conn, cfg, req, user, rest, now)
         }
         (_, ["trips", rest @ ..]) if user.can(Feature::Trips) => {
             trips_route(conn, cfg, req, user, rest, now)
@@ -461,6 +461,7 @@ fn recipes_route(
     req: &Req,
     user: &User,
     segs: &[&str],
+    now: i64,
 ) -> rusqlite::Result<Resp> {
     let feats = features(cfg);
     let not_found = || Ok(Resp::html(404, pages::not_found()));
@@ -470,6 +471,16 @@ fn recipes_route(
             status,
             pages::recipes(user, feats, &recipes, error),
         ))
+    };
+    let set_archived = |id: &str, archived: bool| -> rusqlite::Result<Resp> {
+        let Ok(id) = id.parse::<i64>() else {
+            return not_found();
+        };
+        if recipes::set_archived(conn, id, archived, now)? == 1 {
+            Ok(Resp::redirect("/recipes"))
+        } else {
+            not_found()
+        }
     };
     match (req.method.as_str(), segs) {
         ("GET", []) => page(200, None),
@@ -491,7 +502,10 @@ fn recipes_route(
             let Ok(id) = id.parse::<i64>() else {
                 return not_found();
             };
-            if recipes::get(conn, id)?.is_none() {
+            let Some(recipe) = recipes::get(conn, id)? else {
+                return not_found();
+            };
+            if recipe.archived {
                 return not_found();
             }
             let name =
@@ -508,16 +522,8 @@ fn recipes_route(
                 Err(error) => Err(error),
             }
         }
-        ("POST", [id, "delete"]) => {
-            let Ok(id) = id.parse::<i64>() else {
-                return not_found();
-            };
-            if recipes::delete(conn, id)? == 1 {
-                Ok(Resp::redirect("/recipes"))
-            } else {
-                not_found()
-            }
-        }
+        ("POST", [id, "archive"]) => set_archived(id, true),
+        ("POST", [id, "restore"]) => set_archived(id, false),
         _ => not_found(),
     }
 }
@@ -1155,26 +1161,38 @@ mod tests {
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
         assert!(html.contains("value=\"Roasted soup\""));
         assert_eq!(
-            call(&conn, &granted, "POST", "/recipes/1/delete", "").0,
+            call(&conn, &granted, "POST", "/recipes/1/archive", "").0,
             303
         );
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
-        assert!(html.contains("No recipes yet."));
+        assert!(html.contains("Roasted soup"));
+        assert!(html.contains("text-body-secondary opacity-50"));
 
         assert_eq!(
             call(&conn, &granted, "POST", "/recipes", "name=Fresh+soup").0,
             303
         );
+        let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
+        assert!(html.find("value=\"Fresh soup\"").unwrap() < html.find("Roasted soup").unwrap());
+
         assert_eq!(
             call(&conn, &granted, "POST", "/recipes/1", "name=Changed+soup").0,
             404
+        );
+        assert_eq!(
+            call(&conn, &granted, "POST", "/recipes/1/restore", "").0,
+            303
         );
         assert_eq!(
             call(&conn, &granted, "POST", "/recipes/1/delete", "").0,
             404
         );
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
-        assert!(html.contains("value=\"Fresh soup\""));
+        assert!(
+            html.find("value=\"Fresh soup\"").unwrap()
+                < html.find("value=\"Roasted soup\"").unwrap()
+        );
+        assert!(!html.contains("Delete"));
     }
 
     #[test]
@@ -1187,6 +1205,8 @@ mod tests {
             ("GET", "/recipes", ""),
             ("POST", "/recipes", "name=Denied"),
             ("POST", "/recipes/1", "name=Denied"),
+            ("POST", "/recipes/1/archive", ""),
+            ("POST", "/recipes/1/restore", ""),
             ("POST", "/recipes/1/delete", ""),
         ] {
             assert_eq!(

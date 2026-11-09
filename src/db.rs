@@ -169,6 +169,9 @@ CREATE TABLE recipes (
 );
 CREATE UNIQUE INDEX recipes_name ON recipes(name COLLATE NOCASE);
 ",
+    "
+ALTER TABLE recipes ADD COLUMN archived_at INTEGER;
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {

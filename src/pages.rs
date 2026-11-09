@@ -938,18 +938,30 @@ pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Optio
             "<ul class=\"list-unstyled mb-0\">{}</ul>",
             recipes
                 .iter()
-                .map(|recipe| format!(
-                    "<li class=\"d-flex gap-2 align-items-center mb-2\">\
-                     <form method=\"post\" action=\"/recipes/{}\" class=\"d-flex gap-2 flex-grow-1\">\
-                     <input class=\"form-control\" name=\"name\" value=\"{}\" aria-label=\"Recipe name\" required>\
-                     <button class=\"btn btn-outline-secondary\">Save</button></form>\
-                     <form method=\"post\" action=\"/recipes/{}/delete\" onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"{}\">\
-                     <button class=\"btn btn-outline-danger\">Delete</button></form></li>",
-                    recipe.id,
-                    esc(&recipe.name),
-                    recipe.id,
-                    esc(&format!("Delete {}?", recipe.name)),
-                ))
+                .map(|recipe| {
+                    if recipe.archived {
+                        format!(
+                            "<li class=\"d-flex gap-2 align-items-center mb-2 text-body-secondary opacity-50\">\
+                             <span class=\"flex-grow-1\">{}</span>\
+                             <form method=\"post\" action=\"/recipes/{}/restore\">\
+                             <button class=\"btn btn-outline-secondary\">Restore</button></form></li>",
+                            esc(&recipe.name),
+                            recipe.id,
+                        )
+                    } else {
+                        format!(
+                            "<li class=\"d-flex gap-2 align-items-center mb-2\">\
+                             <form method=\"post\" action=\"/recipes/{}\" class=\"d-flex gap-2 flex-grow-1\">\
+                             <input class=\"form-control\" name=\"name\" value=\"{}\" aria-label=\"Recipe name\" required>\
+                             <button class=\"btn btn-outline-secondary\">Save</button></form>\
+                             <form method=\"post\" action=\"/recipes/{}/archive\">\
+                             <button class=\"btn btn-outline-secondary\">Archive</button></form></li>",
+                            recipe.id,
+                            esc(&recipe.name),
+                            recipe.id,
+                        )
+                    }
+                })
                 .collect::<String>()
         )
     };
@@ -1734,16 +1746,27 @@ mod tests {
 
     #[test]
     fn recipes_page_lists_and_escapes_names_and_supports_basic_changes() {
-        let data = [Recipe {
-            id: 7,
-            name: "Tomato <soup>".into(),
-        }];
+        let data = [
+            Recipe {
+                id: 7,
+                name: "Tomato <soup>".into(),
+                archived: false,
+            },
+            Recipe {
+                id: 8,
+                name: "Old soup".into(),
+                archived: true,
+            },
+        ];
         let html = recipes(&user(1, "mike", true), Features::default(), &data, None);
         assert!(html.contains("value=\"Tomato &lt;soup&gt;\""));
         assert!(!html.contains("value=\"Tomato <soup>\""));
         assert!(html.contains("action=\"/recipes\""));
-        assert!(html.contains("action=\"/recipes/7\""));
-        assert!(html.contains("action=\"/recipes/7/delete\""));
+        assert!(html.contains("action=\"/recipes/7/archive\""));
+        assert!(html.contains("text-body-secondary opacity-50"));
+        assert!(html.contains("Old soup"));
+        assert!(html.contains("action=\"/recipes/8/restore\""));
+        assert!(!html.contains("Delete"));
     }
 
     fn sample_trip() -> Trip {
