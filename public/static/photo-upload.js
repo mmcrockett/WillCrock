@@ -82,10 +82,11 @@
       results.append(row);
       try {
         if (file.size > 25 * 1024 * 1024) throw new Error("Photo exceeds 25 MB.");
+        const body = new FormData();
+        body.append("photo", file, file.name);
         const uploaded = await request(`/photos/upload?filename=${encodeURIComponent(file.name)}`, {
           method: "POST",
-          headers: { "Content-Type": "application/octet-stream" },
-          body: file,
+          body,
         });
         showUpload(file, uploaded, row);
       } catch (error) {
