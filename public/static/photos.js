@@ -4,24 +4,58 @@
     const form = tagPicker.querySelector("[data-tag-form]");
     const tagsInput = form.querySelector("[name=tags]");
     const returnToInput = form.querySelector("[name=return_to]");
-    const newTagInput = form.querySelector("[name=new_tag]");
-    const options = Array.from(form.querySelectorAll("[name=known_tag]"));
+    const newTagInput = form.querySelector("#new-photo-tag");
+    const options = () => Array.from(form.querySelectorAll("[name=known_tag]"));
     const buttons = Array.from(document.querySelectorAll("[data-tag-picker]"));
+    const tagOptions = form.querySelector(".photo-tag-options");
 
     buttons.forEach((button) => {
       button.addEventListener("click", () => {
         form.action = button.dataset.action;
         returnToInput.value = button.dataset.returnTo;
         const selected = new Set(button.dataset.tags.split(", ").filter(Boolean));
-        options.forEach((option) => { option.checked = selected.has(option.value); });
+        tagOptions.querySelectorAll("[data-new-tag-option]").forEach((option) => option.remove());
+        options().forEach((option) => { option.checked = selected.has(option.value); });
         newTagInput.value = "";
         tagPicker.showModal();
       });
     });
 
+    const addTags = () => {
+      const tags = newTagInput.value.split(",").map((tag) => tag.trim().toLowerCase()).filter(Boolean);
+      tags.forEach((tag) => {
+        const existing = options().find((option) => option.value.toLowerCase() === tag);
+        if (existing) {
+          existing.checked = true;
+          return;
+        }
+        const label = document.createElement("label");
+        label.className = "photo-tag-option";
+        label.dataset.newTagOption = "";
+        const checkbox = document.createElement("input");
+        checkbox.className = "visually-hidden";
+        checkbox.type = "checkbox";
+        checkbox.name = "known_tag";
+        checkbox.value = tag;
+        checkbox.checked = true;
+        const text = document.createElement("span");
+        text.textContent = tag;
+        label.append(checkbox, text);
+        tagOptions.append(label);
+      });
+      newTagInput.value = "";
+      newTagInput.focus();
+    };
+
+    tagPicker.querySelector("[data-tag-add]").addEventListener("click", addTags);
+    newTagInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addTags();
+      }
+    });
     form.addEventListener("submit", () => {
-      const selected = options.filter((option) => option.checked).map((option) => option.value);
-      if (newTagInput.value.trim()) selected.push(newTagInput.value.trim());
+      const selected = options().filter((option) => option.checked).map((option) => option.value);
       tagsInput.value = selected.join(", ");
     });
     tagPicker.querySelector("[data-tag-close]").addEventListener("click", () => tagPicker.close());
