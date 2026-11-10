@@ -25,6 +25,8 @@ Create that directory before using Cards, restricting access to the server user 
 
 Upload one JPEG, PNG, GIF, or WebP image per card, up to 25 MB, with a required name. Names can be edited and need not be unique. Click a thumbnail to view the uncropped image and open its original at full resolution. HEIC and PDF files are not supported. There is no delete action, public sharing, or syncing.
 
+Use the Size slider below a card image to shrink it to 25%-100% of its normal display size for scanning; each card's size is remembered in that browser.
+
 Back up both the database (names and image records) and the Cards originals. The `.gallery-v1/` thumbnail cache inside the Cards directory is disposable.
 
 ## Photos
