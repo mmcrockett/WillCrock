@@ -339,13 +339,10 @@ pub fn cards(user: &User, features: Features, cards: Option<&[Card]>) -> String 
             };
             format!(
                 "<form id=\"card-upload\" class=\"card card-body mb-4\">\
-                 <h2 class=\"h5\">Upload a card</h2>\
-                 <p class=\"text-body-secondary small\">Shared with everyone who has Cards access. \
-                 One JPEG, PNG, GIF, or WebP image, up to 25 MB.</p>\
+                 <h2 class=\"h5\">Upload Card</h2>\
                  <div class=\"mb-3\"><label class=\"form-label\" for=\"card-name\">Name</label>\
                  <input class=\"form-control\" id=\"card-name\" name=\"name\" required></div>\
-                 <div class=\"mb-3\"><label class=\"form-label\" for=\"card-file\">Card image</label>\
-                 <input class=\"form-control\" id=\"card-file\" type=\"file\" \
+                 <div class=\"mb-3\"><input class=\"form-control\" id=\"card-file\" type=\"file\" \
                  accept=\"image/jpeg,image/png,image/gif,image/webp\" required></div>\
                  <div><button class=\"btn btn-primary\">Upload</button></div>\
                  <p id=\"card-upload-status\" role=\"status\" aria-live=\"polite\" class=\"mt-2 mb-0\"></p>\
@@ -1673,6 +1670,13 @@ mod tests {
             cards(&member, Features::default(), None).contains("Cards storage is not configured.")
         );
         let empty = cards(&member, Features::default(), Some(&[]));
+        assert!(empty.contains("<h2 class=\"h5\">Upload Card</h2>"));
+        assert!(!empty.contains("Shared with everyone who has Cards access."));
+        assert!(!empty.contains("One JPEG, PNG, GIF, or WebP image, up to 25 MB."));
+        assert!(!empty.contains(">Card image</label>"));
+        assert!(empty.contains(
+            "id=\"card-file\" type=\"file\" accept=\"image/jpeg,image/png,image/gif,image/webp\" required"
+        ));
         assert!(empty.contains("No cards yet."));
         assert!(empty.contains("/static/cards.js?v="));
         let item = Card {
