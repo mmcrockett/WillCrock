@@ -1,13 +1,7 @@
 use super::Photo;
-use image::{codecs::jpeg::JpegEncoder, ImageDecoder, ImageReader};
-use std::fs::{self, File};
-use std::path::{Component, Path};
-
-pub enum ImageKind {
-    Thumbnail,
-    Preview,
-    Original,
-}
+pub use crate::images::ImageKind;
+use std::fs::File;
+use std::path::Path;
 
 pub fn image_file(
     root: &Path,
@@ -15,73 +9,18 @@ pub fn image_file(
     sha256: &str,
     kind: ImageKind,
 ) -> Result<Option<File>, String> {
-    let result = || -> Result<Option<File>, Box<dyn std::error::Error>> {
-        if !Path::new(&photo.path)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
-        {
-            return Ok(None);
-        }
-        let root = root.canonicalize()?;
-        let source = match root.join(&photo.path).canonicalize() {
-            Ok(path) => path,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        if !source.starts_with(&root) || !source.is_file() {
-            return Ok(None);
-        }
-        let size = match kind {
-            ImageKind::Original => return Ok(Some(File::open(source)?)),
-            ImageKind::Thumbnail => 400,
-            ImageKind::Preview => 1600,
-        };
-        if !photo.can_preview() {
-            return Ok(None);
-        }
-        if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("invalid photo hash".into());
-        }
-        // Hidden so scans and library syncs never mistake generated images for originals.
-        let cache_dir = root.join(".gallery-v1");
-        fs::create_dir_all(&cache_dir)?;
-        let cache = cache_dir.join(format!("{sha256}-{size}.jpg"));
-        match File::open(&cache) {
-            Ok(file) => return Ok(Some(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        let mut decoder = ImageReader::open(source)?
-            .with_guessed_format()?
-            .into_decoder()?;
-        let orientation = decoder.orientation()?;
-        let mut image = image::DynamicImage::from_decoder(decoder)?;
-        image.apply_orientation(orientation);
-        let image = image.thumbnail(size, size).to_rgb8();
-        let mut bytes = Vec::new();
-        JpegEncoder::new_with_quality(&mut bytes, 85).encode_image(&image)?;
-        // Publish only complete JPEGs; concurrent requests may generate the same image.
-        let temp = cache_dir.join(format!("{sha256}-{size}-{}.tmp", rand::random::<u64>()));
-        let publish = || -> std::io::Result<()> {
-            fs::write(&temp, &bytes)?;
-            fs::rename(&temp, &cache)
-        };
-        if let Err(e) = publish() {
-            if let Err(cleanup) = fs::remove_file(&temp) {
-                if cleanup.kind() != std::io::ErrorKind::NotFound {
-                    crate::log::error(&format!("remove thumbnail temp file: {cleanup}"));
-                }
-            }
-            return Err(e.into());
-        }
-        Ok(Some(File::open(cache)?))
-    };
-    result().map_err(|e| format!("photo {}: {e}", photo.id))
+    if !matches!(kind, ImageKind::Original) && !photo.can_preview() {
+        return Ok(None);
+    }
+    crate::images::image_file(root, &photo.path, sha256, kind)
+        .map_err(|e| format!("photo {}: {e}", photo.id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::codecs::jpeg::JpegEncoder;
+    use std::fs;
     use std::io::Read;
 
     #[test]

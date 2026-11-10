@@ -98,16 +98,7 @@ fn validate_image(bytes: &[u8], ext: &str) -> Result<(), UploadError> {
     if ext == "heic" {
         return Ok(());
     }
-    let mut reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|_| UploadError::Invalid("Could not read the photo."))?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(20_000);
-    limits.max_image_height = Some(20_000);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
-    reader
-        .decode()
+    crate::images::validate(bytes)
         .map_err(|_| UploadError::Invalid("The photo is damaged or too large to decode."))?;
     Ok(())
 }

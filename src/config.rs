@@ -10,6 +10,13 @@ pub struct Config {
     pub pickle: Option<Pickle>,
     #[serde(default)]
     pub photos: Option<Photos>,
+    #[serde(default)]
+    pub cards: Option<Cards>,
+}
+
+#[derive(Deserialize)]
+pub struct Cards {
+    pub dir: String,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +86,9 @@ mod tests {
             "db_path = \"x\"\n[smtp]\nhost=\"h\"\nusername=\"u\"\npassword=\"p\"\nfrom=\"f\"\n";
         assert!(toml::from_str::<Config>(base).unwrap().pickle.is_none());
         assert!(toml::from_str::<Config>(base).unwrap().photos.is_none());
+        assert!(toml::from_str::<Config>(base).unwrap().cards.is_none());
+        let cards = toml::from_str::<Config>(&format!("{base}[cards]\ndir=\"/c\"\n")).unwrap();
+        assert_eq!(cards.cards.unwrap().dir, "/c");
         let photos = toml::from_str::<Config>(&format!("{base}[photos]\ndir=\"/p\"\n")).unwrap();
         assert_eq!(photos.photos.unwrap().dir, "/p");
         let with = format!(

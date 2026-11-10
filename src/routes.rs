@@ -2,7 +2,7 @@ use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{multipart_upload_file, session_cookie, urlencode, Req, Resp, MAX_PHOTO_SIZE};
 use crate::photos::Visibility;
-use crate::{log, mail, pages, photos, pickle, recipes, sms, trips};
+use crate::{cards, images, log, mail, pages, photos, pickle, recipes, sms, trips};
 use rusqlite::{Connection, OptionalExtension};
 
 fn features(cfg: &Config) -> pages::Features {
@@ -66,8 +66,18 @@ fn authed(
     now: i64,
 ) -> rusqlite::Result<Resp> {
     let visibility = Visibility::for_user(user);
+    if matches!(segs, ["cards", ..]) && !user.can(Feature::Cards) {
+        return Ok(Resp::html(404, pages::not_found()));
+    }
     if let Some(status) = req.body_error {
-        return Ok(if req.path == "/photos/upload" {
+        return Ok(if req.path == "/cards/upload" {
+            Resp::json(
+                status,
+                &serde_json::json!({
+                    "error": if status == 413 { "Card image exceeds 25 MB." } else { "Could not read the upload." }
+                }),
+            )
+        } else if req.path == "/photos/upload" {
             Resp::json(
                 status,
                 &serde_json::json!({
@@ -88,6 +98,9 @@ fn authed(
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
         ("POST", ["admin", "photos", "i", id, "tags"]) if cfg.photos.is_some() => {
             photo_tags(conn, cfg, req, user, id, Visibility::Admin)
+        }
+        (_, ["cards", rest @ ..]) if user.can(Feature::Cards) => {
+            cards_route(conn, cfg, req, user, rest, now)
         }
         ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
         ("GET", ["pickle"]) if user.can(Feature::Pickle) => {
@@ -505,6 +518,116 @@ fn sms_page(cfg: &Config, user: &User) -> Resp {
     )
 }
 
+fn cards_route(
+    conn: &Connection,
+    cfg: &Config,
+    req: &Req,
+    user: &User,
+    segs: &[&str],
+    now: i64,
+) -> rusqlite::Result<Resp> {
+    let feats = features(cfg);
+    let upload_error = |status, message| Resp::json(status, &serde_json::json!({"error": message}));
+    let is_upload = req.method == "POST" && segs == ["upload"];
+    let Some(config) = cfg.cards.as_ref() else {
+        return Ok(if req.method == "GET" && segs.is_empty() {
+            Resp::html(200, pages::cards(user, feats, None))
+        } else if is_upload {
+            upload_error(503, "Cards storage is not configured.")
+        } else {
+            Resp::html(404, pages::not_found())
+        });
+    };
+    let root = match cards::storage_root(&config.dir, cfg.photos.as_ref().map(|p| p.dir.as_str())) {
+        Ok(root) => root,
+        Err(e) => {
+            log::error(&format!("card storage: {e}"));
+            return Ok(if is_upload {
+                upload_error(500, "Could not access card storage. Please try again.")
+            } else {
+                Resp::html(500, pages::error())
+            });
+        }
+    };
+    match (req.method.as_str(), segs) {
+        ("GET", []) => Ok(Resp::html(
+            200,
+            pages::cards(user, feats, Some(&cards::list(conn)?)),
+        )),
+        ("POST", ["upload"]) => {
+            if req.requested_with != "1" {
+                return Ok(upload_error(400, "Invalid upload request."));
+            }
+            let Some(bytes) = multipart_upload_file(&req.body, &req.content_type) else {
+                return Ok(upload_error(400, "Invalid upload request."));
+            };
+            if bytes.len() > MAX_PHOTO_SIZE {
+                return Ok(upload_error(413, "Card image exceeds 25 MB."));
+            }
+            let name = req.query.get("name").map(String::as_str).unwrap_or("");
+            Ok(match cards::upload(conn, &root, name, bytes, now) {
+                Ok(id) => Resp::json(200, &serde_json::json!({"id": id})),
+                Err(cards::UploadError::Invalid(message)) => upload_error(400, message),
+                Err(cards::UploadError::Failed(message)) => {
+                    log::error(&format!("card upload: {message}"));
+                    upload_error(500, "Could not save the card. Please try again.")
+                }
+            })
+        }
+        ("GET", [id]) | ("POST", [id, "name"]) | ("GET", [id, "thumb" | "original"]) => {
+            let Ok(id) = id.parse::<i64>() else {
+                return Ok(Resp::html(404, pages::not_found()));
+            };
+            let Some(card) = cards::get(conn, id)? else {
+                return Ok(Resp::html(404, pages::not_found()));
+            };
+            if req.method == "POST" {
+                let raw = req.form.get("name").map(String::as_str).unwrap_or("");
+                let name = match cards::parse_name(raw) {
+                    Ok(name) => name,
+                    Err(message) => {
+                        return Ok(Resp::html(
+                            400,
+                            pages::card(user, feats, &card, raw, Some(message)),
+                        ))
+                    }
+                };
+                return Ok(if cards::rename(conn, id, &name)? == 1 {
+                    Resp::redirect(&format!("/cards/{id}"))
+                } else {
+                    Resp::html(404, pages::not_found())
+                });
+            }
+            if segs.len() == 1 {
+                return Ok(Resp::html(
+                    200,
+                    pages::card(user, feats, &card, &card.name, None),
+                ));
+            }
+            let (kind, mime) = if segs[1] == "thumb" {
+                (images::ImageKind::Thumbnail, "image/jpeg")
+            } else {
+                (images::ImageKind::Original, card.mime.as_str())
+            };
+            let result =
+                images::image_file(&root, &card.path, &card.sha256, kind).and_then(|file| {
+                    file.map(|file| Resp::file(file, mime))
+                        .transpose()
+                        .map_err(|e| e.to_string())
+                });
+            Ok(match result {
+                Ok(Some(resp)) => resp,
+                Ok(None) => Resp::html(404, pages::not_found()),
+                Err(e) => {
+                    log::error(&format!("card {id} image: {e}"));
+                    Resp::html(500, pages::error())
+                }
+            })
+        }
+        _ => Ok(Resp::html(404, pages::not_found())),
+    }
+}
+
 fn recipes_route(
     conn: &Connection,
     cfg: &Config,
@@ -830,6 +953,256 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         let status = text["Status: ".len()..].split("\r\n").next().unwrap();
         (status.parse().unwrap(), text)
+    }
+
+    fn card_upload(name: &str, bytes: &[u8]) -> Req {
+        let mut req = Req::test("POST", "/cards/upload", "");
+        req.requested_with = "1".into();
+        req.query.insert("name".into(), name.into());
+        req.content_type = "multipart/form-data; boundary=cards-test".into();
+        req.body = b"--cards-test\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"card.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
+        req.body.extend_from_slice(bytes);
+        req.body.extend_from_slice(b"\r\n--cards-test--\r\n");
+        req
+    }
+
+    fn cards_response(conn: &Connection, config: &Config, user: &User, req: Req) -> Vec<u8> {
+        let segs: Vec<_> = req.path.split('/').filter(|s| !s.is_empty()).collect();
+        let resp = authed(conn, config, &req, &segs, user, "tok", 100).unwrap();
+        let mut output = Vec::new();
+        resp.write_to(&mut output).unwrap();
+        output
+    }
+
+    fn response_body(response: &[u8]) -> &[u8] {
+        let at = response.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        &response[at + 4..]
+    }
+
+    #[test]
+    fn cards_flow_is_shared_gated_and_serves_originals_inline() {
+        let root = cards::tests::temp_dir();
+        let conn = db::open_memory();
+        let mut config = cfg();
+        config.cards = Some(crate::config::Cards {
+            dir: root.to_str().unwrap().into(),
+        });
+        let granted = user(vec![Feature::Cards]);
+        let denied = user(vec![Feature::Photos]);
+        let mut other = user(vec![Feature::Cards]);
+        other.id = 2;
+        let mut admin = user(vec![]);
+        admin.is_admin = true;
+        let png = cards::tests::image(image::ImageFormat::Png);
+        let uploaded = cards_response(&conn, &config, &granted, card_upload("  <Library>  ", &png));
+        assert!(uploaded.starts_with(b"Status: 200"));
+        let data: serde_json::Value = serde_json::from_slice(response_body(&uploaded)).unwrap();
+        let id = data["id"].as_i64().unwrap();
+        let detail = format!("/cards/{id}");
+        let rename = format!("/cards/{id}/name");
+        let original = format!("/cards/{id}/original");
+        let thumb = format!("/cards/{id}/thumb");
+        for (method, path) in [
+            ("GET", "/cards"),
+            ("POST", "/cards/upload"),
+            ("GET", &detail),
+            ("POST", &rename),
+            ("GET", &original),
+            ("GET", &thumb),
+        ] {
+            let req = Req::test(method, path, "");
+            let mut output = Vec::new();
+            handle(&conn, &config, &req, 100)
+                .write_to(&mut output)
+                .unwrap();
+            assert!(output.starts_with(b"Status: 303"), "{method} {path}");
+            assert!(String::from_utf8_lossy(&output).contains("Location: /login"));
+            assert!(
+                cards_response(&conn, &config, &denied, req).starts_with(b"Status: 404"),
+                "{method} {path}"
+            );
+        }
+        for u in [&granted, &other, &admin] {
+            let grid = String::from_utf8(cards_response(
+                &conn,
+                &config,
+                u,
+                Req::test("GET", "/cards", ""),
+            ))
+            .unwrap();
+            assert!(grid.contains(&format!("href=\"{detail}\"")));
+            assert!(grid.contains("&lt;Library&gt;"));
+            let page = String::from_utf8(cards_response(
+                &conn,
+                &config,
+                u,
+                Req::test("GET", &detail, ""),
+            ))
+            .unwrap();
+            assert!(page.contains(&format!("src=\"{original}\"")));
+            let image = cards_response(&conn, &config, u, Req::test("GET", &original, ""));
+            let headers =
+                String::from_utf8_lossy(&image[..image.len() - response_body(&image).len()]);
+            assert!(headers.contains("Content-Type: image/png"));
+            assert!(headers.contains("Cache-Control: private, no-store"));
+            assert!(!headers.contains("attachment"));
+            assert_eq!(response_body(&image), png);
+            let thumbnail = cards_response(&conn, &config, u, Req::test("GET", &thumb, ""));
+            assert!(thumbnail.starts_with(b"Status: 200"));
+            let image = image::load_from_memory(response_body(&thumbnail)).unwrap();
+            assert_eq!((image.width(), image.height()), (400, 200));
+        }
+        let renamed = cards_response(
+            &conn,
+            &config,
+            &other,
+            Req::test("POST", &rename, "name=+New+%22Name%22+"),
+        );
+        assert!(String::from_utf8_lossy(&renamed).contains(&format!("Location: {detail}")));
+        assert_eq!(cards::get(&conn, id).unwrap().unwrap().name, "New \"Name\"");
+        let invalid = cards_response(&conn, &config, &other, Req::test("POST", &rename, "name=+"));
+        assert!(invalid.starts_with(b"Status: 400"));
+        assert!(String::from_utf8_lossy(&invalid).contains("Card name is required."));
+        assert_eq!(cards::get(&conn, id).unwrap().unwrap().name, "New \"Name\"");
+        assert!(
+            cards_response(&conn, &config, &admin, card_upload("Admin card", &png))
+                .starts_with(b"Status: 200")
+        );
+        assert!(cards_response(
+            &conn,
+            &config,
+            &admin,
+            Req::test("POST", &rename, "name=Renamed+by+admin")
+        )
+        .starts_with(b"Status: 303"));
+        for (method, path) in [
+            ("GET", "/cards/bad"),
+            ("GET", "/cards/999"),
+            ("POST", "/cards/999/name"),
+            ("GET", "/cards/999/original"),
+            ("GET", "/cards/999/thumb"),
+        ] {
+            assert!(
+                cards_response(&conn, &config, &granted, Req::test(method, path, ""))
+                    .starts_with(b"Status: 404")
+            );
+        }
+        assert!(photos::unsynced(&conn).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn card_upload_errors_are_explicit_and_do_not_create_cards() {
+        let root = cards::tests::temp_dir();
+        let conn = db::open_memory();
+        let mut config = cfg();
+        config.cards = Some(crate::config::Cards {
+            dir: root.to_str().unwrap().into(),
+        });
+        let granted = user(vec![Feature::Cards]);
+        let png = cards::tests::image(image::ImageFormat::Png);
+        let mut missing_header = card_upload("Card", &png);
+        missing_header.requested_with.clear();
+        let mut malformed = card_upload("Card", &png);
+        malformed.body = b"not multipart".to_vec();
+        for req in [
+            missing_header,
+            malformed,
+            card_upload(" ", &png),
+            card_upload("Card", b"%PDF-1.0"),
+            card_upload("Card", &[0xff, 0xd8, 0xff]),
+        ] {
+            let response = cards_response(&conn, &config, &granted, req);
+            assert!(response.starts_with(b"Status: 400"));
+            let data: serde_json::Value = serde_json::from_slice(response_body(&response)).unwrap();
+            assert!(data["error"].as_str().is_some_and(|s| !s.is_empty()));
+        }
+        let oversized = card_upload("Card", &vec![0; MAX_PHOTO_SIZE + 1]);
+        assert!(cards_response(&conn, &config, &granted, oversized).starts_with(b"Status: 413"));
+        for status in [400, 413] {
+            let mut req = card_upload("Card", &png);
+            req.body_error = Some(status);
+            let response = cards_response(&conn, &config, &granted, req);
+            assert!(response.starts_with(format!("Status: {status}").as_bytes()));
+            let data: serde_json::Value = serde_json::from_slice(response_body(&response)).unwrap();
+            assert!(data["error"].as_str().unwrap().contains(if status == 413 {
+                "Card image"
+            } else {
+                "upload"
+            }));
+        }
+        assert!(cards::list(&conn).unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        config.cards = None;
+        let page = cards_response(&conn, &config, &granted, Req::test("GET", "/cards", ""));
+        assert!(String::from_utf8_lossy(&page).contains("Cards storage is not configured."));
+        assert!(
+            cards_response(&conn, &config, &granted, card_upload("Card", &png))
+                .starts_with(b"Status: 503")
+        );
+        config.cards = Some(crate::config::Cards {
+            dir: root.to_str().unwrap().into(),
+        });
+        config.photos = Some(crate::config::Photos {
+            dir: root.to_str().unwrap().into(),
+        });
+        assert!(
+            cards_response(&conn, &config, &granted, card_upload("Card", &png))
+                .starts_with(b"Status: 500")
+        );
+        assert!(cards::list(&conn).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn card_images_refuse_missing_files_and_paths_outside_storage() {
+        let root = cards::tests::temp_dir();
+        let outside = cards::tests::temp_dir();
+        let conn = db::open_memory();
+        let mut config = cfg();
+        config.cards = Some(crate::config::Cards {
+            dir: root.to_str().unwrap().into(),
+        });
+        let granted = user(vec![Feature::Cards]);
+        let png = cards::tests::image(image::ImageFormat::Png);
+        let id = cards::upload(&conn, &root, "Card", &png, 100).unwrap();
+        let path = root.join(cards::get(&conn, id).unwrap().unwrap().path);
+        std::fs::remove_file(&path).unwrap();
+        for kind in ["original", "thumb"] {
+            assert!(cards_response(
+                &conn,
+                &config,
+                &granted,
+                Req::test("GET", &format!("/cards/{id}/{kind}"), "")
+            )
+            .starts_with(b"Status: 404"));
+        }
+        let secret = outside.join("outside.png");
+        std::fs::write(&secret, &png).unwrap();
+        std::os::unix::fs::symlink(&secret, &path).unwrap();
+        assert!(cards_response(
+            &conn,
+            &config,
+            &granted,
+            Req::test("GET", &format!("/cards/{id}/original"), "")
+        )
+        .starts_with(b"Status: 404"));
+        for path in ["../outside.png", secret.to_str().unwrap()] {
+            conn.execute(
+                "UPDATE cards SET path = ?1 WHERE id = ?2",
+                rusqlite::params![path, id],
+            )
+            .unwrap();
+            assert!(cards_response(
+                &conn,
+                &config,
+                &granted,
+                Req::test("GET", &format!("/cards/{id}/original"), "")
+            )
+            .starts_with(b"Status: 404"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
