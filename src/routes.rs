@@ -987,6 +987,10 @@ mod tests {
         config.cards = Some(crate::config::Cards {
             dir: root.to_str().unwrap().into(),
         });
+        let missing_photos = root.with_extension("missing-photos").join("library");
+        config.photos = Some(crate::config::Photos {
+            dir: missing_photos.to_str().unwrap().into(),
+        });
         let granted = user(vec![Feature::Cards]);
         let denied = user(vec![Feature::Photos]);
         let mut other = user(vec![Feature::Cards]);
@@ -1088,6 +1092,7 @@ mod tests {
             );
         }
         assert!(photos::unsynced(&conn).unwrap().is_empty());
+        assert!(!missing_photos.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
