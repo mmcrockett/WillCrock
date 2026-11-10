@@ -287,6 +287,21 @@ body {
   height: auto;
 }
 
+.card-display {
+  width: 100%;
+  margin-inline: auto;
+}
+
+.card-display.card-sized {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-sized .card-picture {
+  width: var(--card-size, 100%);
+}
+
 .tile.locked:hover .tile-box {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
   transform: none;

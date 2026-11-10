@@ -37,3 +37,45 @@
     }
   });
 })();
+
+(() => {
+  const display = document.querySelector(".card-display");
+  if (!display) return;
+  const image = display.querySelector("img");
+  const controls = document.querySelector("#card-size-controls");
+  const slider = document.querySelector("#card-size");
+  const value = document.querySelector("#card-size-value");
+  const status = document.querySelector("#card-size-status");
+  const key = `willcrock:card-size:${display.dataset.cardId}`;
+  const storageError = () => {
+    status.textContent = "Size can't be remembered in this browser.";
+  };
+  const update = () => {
+    display.style.setProperty("--card-size", `${slider.value}%`);
+    value.value = `${slider.value}%`;
+  };
+  const initialize = () => {
+    if (!image.naturalWidth) return;
+    display.style.maxWidth = `${image.naturalWidth}px`;
+    display.style.aspectRatio = `${image.naturalWidth} / ${image.naturalHeight}`;
+    display.classList.add("card-sized");
+    try {
+      const saved = Number(localStorage.getItem(key));
+      if (saved >= 25 && saved <= 100 && saved % 5 === 0) slider.value = saved;
+    } catch {
+      storageError();
+    }
+    update();
+    controls.hidden = false;
+  };
+  slider.addEventListener("input", update);
+  slider.addEventListener("change", () => {
+    try {
+      localStorage.setItem(key, slider.value);
+    } catch {
+      storageError();
+    }
+  });
+  if (image.complete) initialize();
+  else image.addEventListener("load", initialize, { once: true });
+})();

@@ -379,15 +379,24 @@ pub fn card(
         &format!(
             "{}<p><a href=\"/cards\">Back to Cards</a></p>\
              <p><a href=\"/cards/{id}/original\">View full-size image</a></p>\
-             <img class=\"card-picture mb-4\" src=\"/cards/{id}/original\" alt=\"{alt}\">\
+             <div class=\"mb-4\"><div class=\"card-display\" data-card-id=\"{id}\">\
+             <img id=\"card-picture\" class=\"card-picture\" src=\"/cards/{id}/original\" alt=\"{alt}\">\
+             </div></div>\
+             <div id=\"card-size-controls\" class=\"mb-4\" hidden>\
+             <label class=\"form-label\" for=\"card-size\">Size: <output id=\"card-size-value\" for=\"card-size\">100%</output></label>\
+             <input class=\"form-range\" id=\"card-size\" type=\"range\" min=\"25\" max=\"100\" step=\"5\" \
+             value=\"100\" aria-controls=\"card-picture\">\
+             <p id=\"card-size-status\" class=\"small text-body-secondary mb-0\" role=\"status\"></p></div>\
              {error}<form method=\"post\" action=\"/cards/{id}/name\" class=\"card card-body\">\
              <label class=\"form-label\" for=\"card-name\">Name</label>\
              <input class=\"form-control mb-3\" id=\"card-name\" name=\"name\" value=\"{name}\" required>\
-             <div><button class=\"btn btn-primary\">Save name</button></div></form>",
+             <div><button class=\"btn btn-primary\">Save name</button></div></form>\
+             <script src=\"{script}\" defer></script>",
             page_title(&card.name),
             id = card.id,
             alt = esc(&card.name),
             name = esc(name),
+            script = asset("/static/cards.js"),
         ),
     )
 }
@@ -1688,6 +1697,14 @@ mod tests {
         };
         let detail = card(&member, Features::default(), &item, &item.name, None);
         assert!(detail.contains("src=\"/cards/7/original\""));
+        assert!(detail.contains("class=\"card-display\" data-card-id=\"7\""));
+        assert!(detail.contains("id=\"card-size-controls\" class=\"mb-4\" hidden"));
+        assert!(detail.contains("for=\"card-size\">Size:"));
+        assert!(detail.contains(
+            "id=\"card-size\" type=\"range\" min=\"25\" max=\"100\" step=\"5\" value=\"100\" aria-controls=\"card-picture\""
+        ));
+        assert!(detail.contains("id=\"card-picture\" class=\"card-picture\""));
+        assert!(detail.contains("/static/cards.js?v="));
         assert!(detail.contains("action=\"/cards/7/name\""));
         assert!(detail.contains("value=\"&lt;Library &amp; &quot;ID&quot;&gt;\""));
         assert!(!detail.contains("<Library"));
