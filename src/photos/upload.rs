@@ -188,6 +188,7 @@ pub fn upload(
             ))
         })?;
         let mut found = None;
+        let mut restricted_match = false;
         for row in rows {
             let (id, date, path) = row?;
             let path = match root.join(path).canonicalize() {
@@ -199,16 +200,19 @@ pub fn upload(
                 && path.is_file()
                 && super::hash(&path).map_err(UploadError::Failed)? == hash
             {
-                found = Some((id, date));
-                break;
+                if super::visible(&tx, id, visibility)? {
+                    found = Some((id, date));
+                    break;
+                }
+                restricted_match = true;
             }
+        }
+        if found.is_none() && restricted_match {
+            return Err(UploadError::NotFound);
         }
         found
     };
     if let Some((id, date)) = duplicate {
-        if !super::visible(&tx, id, visibility)? {
-            return Err(UploadError::NotFound);
-        }
         tx.commit()?;
         return Ok(Uploaded {
             id,
@@ -655,6 +659,80 @@ mod tests {
                 .total,
             0
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_upload_prefers_visible_copy_over_admin_only_matches() {
+        let root =
+            std::env::temp_dir().join(format!("photo-mixed-duplicates-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let mut conn = db::open_memory();
+        let bytes = jpeg(true);
+        let hidden = upload(&conn, &root, "hidden.jpg", &bytes, 100, Visibility::Admin).unwrap();
+        photos::set_tags(
+            &conn,
+            hidden.id,
+            &[photos::ADMIN_ONLY_TAG.into()],
+            Visibility::Admin,
+        )
+        .unwrap();
+        std::fs::write(root.join("visible.jpg"), &bytes).unwrap();
+        photos::scan(&mut conn, &root, 100).unwrap();
+        let visible_id: i64 = conn
+            .query_row(
+                "SELECT id FROM photos WHERE path = 'visible.jpg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(visible_id > hidden.id);
+        let duplicate = upload(
+            &conn,
+            &root,
+            "another.jpg",
+            &bytes,
+            100,
+            Visibility::Restricted,
+        )
+        .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.id, visible_id);
+        assert_eq!(duplicate.date, None);
+        assert_eq!(duplicate.date_source, "existing");
+
+        std::fs::write(root.join("visible.jpg"), b"changed").unwrap();
+        assert!(matches!(
+            upload(
+                &conn,
+                &root,
+                "another.jpg",
+                &bytes,
+                100,
+                Visibility::Restricted
+            ),
+            Err(UploadError::NotFound)
+        ));
+        std::fs::write(root.join("visible.jpg"), &bytes).unwrap();
+        photos::set_tags(
+            &conn,
+            visible_id,
+            &[photos::ADMIN_ONLY_TAG.into()],
+            Visibility::Admin,
+        )
+        .unwrap();
+        assert!(matches!(
+            upload(
+                &conn,
+                &root,
+                "another.jpg",
+                &bytes,
+                100,
+                Visibility::Restricted
+            ),
+            Err(UploadError::NotFound)
+        ));
+        assert_eq!(photos::unsynced(&conn).unwrap().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
