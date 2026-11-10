@@ -1,5 +1,5 @@
 use super::add_date_tags;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
@@ -173,7 +173,7 @@ pub fn upload(
         .canonicalize()
         .map_err(|e| io_error("photo directory", e))?;
     let hash = format!("{:x}", Sha256::digest(bytes));
-    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let tx = super::photo_transaction(conn, &root).map_err(UploadError::Failed)?;
     let duplicate = {
         let mut stmt = tx.prepare(
             "SELECT id, taken_on, path FROM photos WHERE sha256 = ?1 AND missing_at IS NULL",
@@ -297,9 +297,10 @@ pub fn change_date(
     if !month_valid(month) {
         return Err(UploadError::Invalid("Choose a valid year and month."));
     }
-    let album = super::month_album(month)
-        .ok_or_else(|| UploadError::Failed(format!("invalid photo month: {month}")))?;
-    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let root = root
+        .canonicalize()
+        .map_err(|e| io_error("photo directory", e))?;
+    let tx = super::photo_transaction(conn, &root).map_err(UploadError::Failed)?;
     let photo = tx
         .query_row(
             "SELECT taken_on, path FROM photos WHERE id = ?1 AND missing_at IS NULL",
@@ -314,61 +315,25 @@ pub fn change_date(
         return Ok(true);
     }
 
-    if let Some(old) = &old_date {
-        tx.execute(
-            "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id IN \
-             (SELECT id FROM tags WHERE name IN (?2, ?3))",
-            params![id, old.get(..4).unwrap_or(""), old.get(..7).unwrap_or("")],
-        )?;
-    }
-    let name = Path::new(&old_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| UploadError::Failed(format!("invalid photo path: {old_path}")))?;
-    let new_path = format!("{album}/{name}");
-    let moved = new_path != old_path;
-    let move_root = if moved {
-        Some(
-            root.canonicalize()
-                .map_err(|e| io_error("photo directory", e))?,
-        )
-    } else {
-        None
-    };
-    let move_hash = if let Some(root) = &move_root {
-        Some(super::move_photo_file(root, &old_path, &new_path).map_err(UploadError::Failed)?)
-    } else {
-        None
-    };
-    let database_result = (|| -> Result<(), UploadError> {
-        if let Some(sha256) = move_hash.as_deref() {
+    if super::month_album(month).as_deref() == Some(super::album_of(&old_path)) {
+        if let Some(old) = &old_date {
             tx.execute(
-                "UPDATE photos SET path = ?1, album = ?2, taken_on = ?3, sha256 = ?4, \
-                 synced_at = NULL WHERE id = ?5",
-                params![new_path, album, month, sha256, id],
-            )?;
-            super::record_photo_move(&tx, id, &old_path, &new_path, sha256)?;
-        } else {
-            tx.execute(
-                "UPDATE photos SET taken_on = ?1 WHERE id = ?2",
-                params![month, id],
+                "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id IN \
+                 (SELECT id FROM tags WHERE name IN (?2, ?3))",
+                params![id, old.get(..4).unwrap_or(""), old.get(..7).unwrap_or("")],
             )?;
         }
+        tx.execute(
+            "UPDATE photos SET taken_on = ?1 WHERE id = ?2",
+            params![month, id],
+        )?;
         add_date_tags(&tx, id, month)?;
         tx.commit()?;
-        Ok(())
-    })();
-    if let Err(error) = database_result {
-        if let Some(root) = &move_root {
-            match super::undo_photo_file_move(root, &old_path, &new_path) {
-                Ok(()) => {}
-                Err(rollback) => {
-                    crate::log::error(&format!("roll back photo date move {old_path}: {rollback}"))
-                }
-            }
-        }
-        return Err(error);
+        return Ok(true);
     }
+    super::queue_photo_move(&tx, &root, id, &old_path, month).map_err(UploadError::Failed)?;
+    tx.commit()?;
+    super::recover_photo_moves(conn, &root).map_err(UploadError::Failed)?;
     Ok(true)
 }
 
