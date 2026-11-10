@@ -1,8 +1,10 @@
 mod auth;
+mod cards;
 mod cli;
 mod config;
 mod db;
 mod http;
+mod images;
 mod log;
 mod mail;
 mod pages;

@@ -12,6 +12,7 @@ const SLIDE_AFTER: i64 = 3600;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Feature {
+    Cards,
     Sms,
     Pickle,
     Recipes,
@@ -20,7 +21,8 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 5] = [
+    pub const ALL: [Feature; 6] = [
+        Feature::Cards,
         Feature::Sms,
         Feature::Pickle,
         Feature::Recipes,
@@ -30,6 +32,7 @@ impl Feature {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Feature::Cards => "cards",
             Feature::Sms => "sms",
             Feature::Pickle => "pickle",
             Feature::Recipes => "recipes",
@@ -40,6 +43,7 @@ impl Feature {
 
     pub fn label(self) -> &'static str {
         match self {
+            Feature::Cards => "Cards",
             Feature::Sms => "SMS",
             Feature::Pickle => "Pickle",
             Feature::Recipes => "Recipes",
@@ -512,6 +516,14 @@ mod tests {
 
         set_access(&conn, id, Feature::Pickle, false).unwrap();
         assert!(sam(&conn).access.is_empty());
+
+        let cards = Feature::parse("cards").unwrap();
+        set_access(&conn, id, cards, true).unwrap();
+        assert_eq!(sam(&conn).access, vec![Feature::Cards]);
+        assert!(sam(&conn).can(Feature::Cards));
+        assert!(!sam(&conn).can(Feature::Photos));
+        set_access(&conn, id, cards, false).unwrap();
+        assert!(!sam(&conn).can(Feature::Cards));
 
         let mike = list_users(&conn)
             .unwrap()

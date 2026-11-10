@@ -1,4 +1,5 @@
 use crate::auth::{Feature, User};
+use crate::cards::Card;
 use crate::config::Quackr;
 use crate::photos;
 use crate::pickle::dashboard::{self, Dashboard};
@@ -81,6 +82,8 @@ const ICON_RECIPES: &str =
     <path d=\"M6 17h12\"/>";
 const ICON_PHOTOS: &str = "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/>\
     <circle cx=\"9\" cy=\"9\" r=\"2\"/><path d=\"m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21\"/>";
+const ICON_CARDS: &str = "<rect x=\"2\" y=\"4\" width=\"20\" height=\"16\" rx=\"2\"/>\
+    <circle cx=\"8\" cy=\"10\" r=\"2\"/><path d=\"M5 16v-1a3 3 0 0 1 6 0v1M14 9h5M14 13h5\"/>";
 const ICON_TRIPS: &str = "<path d=\"M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0z\"/>\
     <circle cx=\"12\" cy=\"10\" r=\"3\"/>";
 const ICON_MENU: &str = "<path d=\"M4 6h16M4 12h16M4 18h16\"/>";
@@ -152,6 +155,7 @@ fn nav_items(user: &User, features: Features) -> Vec<NavItem> {
         });
     }
     for (feature, key, href, icon) in [
+        (Feature::Cards, "cards", "/cards", ICON_CARDS),
         (Feature::Recipes, "recipes", "/recipes", ICON_RECIPES),
         (Feature::Photos, "photos", "/photos", ICON_PHOTOS),
         (Feature::Trips, "trips", "/trips", ICON_TRIPS),
@@ -306,6 +310,87 @@ pub fn home(user: &User, features: Features) -> String {
              <img src=\"{crest}\" alt=\"WillCrock crest: ID IAM SCIO\" class=\"hero-crest\"></section>\
              <div class=\"tile-grid\">{tiles}</div>",
             crest = asset("/static/crest.png"),
+        ),
+    )
+}
+
+pub fn cards(user: &User, features: Features, cards: Option<&[Card]>) -> String {
+    let body = match cards {
+        None => {
+            "<div class=\"alert alert-info\">Cards storage is not configured.</div>".to_string()
+        }
+        Some(cards) => {
+            let tiles: String = cards
+                .iter()
+                .map(|card| {
+                    format!(
+                        "<a class=\"tile\" href=\"/cards/{id}\"><span class=\"tile-box\">\
+                     <img src=\"/cards/{id}/thumb\" alt=\"{name}\" loading=\"lazy\"></span>\
+                     <span>{name}</span></a>",
+                        id = card.id,
+                        name = esc(&card.name),
+                    )
+                })
+                .collect();
+            let grid = if cards.is_empty() {
+                "<p>No cards yet.</p>".to_string()
+            } else {
+                format!("<div class=\"tile-grid cards-grid\">{tiles}</div>")
+            };
+            format!(
+                "<form id=\"card-upload\" class=\"card card-body mb-4\">\
+                 <h2 class=\"h5\">Upload a card</h2>\
+                 <p class=\"text-body-secondary small\">Shared with everyone who has Cards access. \
+                 One JPEG, PNG, GIF, or WebP image, up to 25 MB.</p>\
+                 <div class=\"mb-3\"><label class=\"form-label\" for=\"card-name\">Name</label>\
+                 <input class=\"form-control\" id=\"card-name\" name=\"name\" required></div>\
+                 <div class=\"mb-3\"><label class=\"form-label\" for=\"card-file\">Card image</label>\
+                 <input class=\"form-control\" id=\"card-file\" type=\"file\" \
+                 accept=\"image/jpeg,image/png,image/gif,image/webp\" required></div>\
+                 <div><button class=\"btn btn-primary\">Upload</button></div>\
+                 <p id=\"card-upload-status\" role=\"status\" aria-live=\"polite\" class=\"mt-2 mb-0\"></p>\
+                 <noscript>Enable JavaScript to upload cards.</noscript></form>\
+                 {grid}<script src=\"{script}\" defer></script>",
+                script = asset("/static/cards.js"),
+            )
+        }
+    };
+    app_page(
+        "Cards",
+        "cards",
+        user,
+        features,
+        &format!("{}{body}", page_title("Cards")),
+    )
+}
+
+pub fn card(
+    user: &User,
+    features: Features,
+    card: &Card,
+    name: &str,
+    error: Option<&str>,
+) -> String {
+    let error = error
+        .map(|message| format!("<div class=\"alert alert-danger\">{}</div>", esc(message)))
+        .unwrap_or_default();
+    app_page(
+        &card.name,
+        "cards",
+        user,
+        features,
+        &format!(
+            "{}<p><a href=\"/cards\">Back to Cards</a></p>\
+             <p><a href=\"/cards/{id}/original\">View full-size image</a></p>\
+             <img class=\"card-picture mb-4\" src=\"/cards/{id}/original\" alt=\"{alt}\">\
+             {error}<form method=\"post\" action=\"/cards/{id}/name\" class=\"card card-body\">\
+             <label class=\"form-label\" for=\"card-name\">Name</label>\
+             <input class=\"form-control mb-3\" id=\"card-name\" name=\"name\" value=\"{name}\" required>\
+             <div><button class=\"btn btn-primary\">Save name</button></div></form>",
+            page_title(&card.name),
+            id = card.id,
+            alt = esc(&card.name),
+            name = esc(name),
         ),
     )
 }
@@ -1469,6 +1554,7 @@ mod tests {
         let html = admin_users(&[user(1, "mike", true), sam], &admin, Features::default());
         assert!(html.contains("/admin/users/2/revoke/sms"));
         assert!(html.contains("/admin/users/2/grant/pickle"));
+        assert!(html.contains("/admin/users/2/grant/cards"));
         assert!(!html.contains("/admin/users/1/grant"));
         assert!(!html.contains("/admin/users/1/revoke"));
     }
@@ -1561,14 +1647,53 @@ mod tests {
         let at = |needle: &str| html.find(needle).unwrap();
         let order = [
             at("href=\"/\""),
+            at("href=\"/cards\""),
             at("href=\"/pickle\""),
             at("href=\"/sms\""),
             at("href=\"/admin/users\""),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]));
         let tiles = &html[at("tile-grid")..];
+        assert!(tiles.find("/cards").unwrap() < tiles.find("/photos").unwrap());
         assert!(tiles.find("/pickle").unwrap() < tiles.find("/sms").unwrap());
         assert!(tiles.find("/sms").unwrap() < tiles.find("/admin/users").unwrap());
+    }
+
+    #[test]
+    fn cards_tiles_require_access_and_pages_escape_names() {
+        assert!(
+            !home(&member_with(vec![Feature::Photos]), Features::default())
+                .contains("href=\"/cards\"")
+        );
+        let member = member_with(vec![Feature::Cards]);
+        for u in [&member, &user(1, "Admin", true)] {
+            assert!(home(u, Features::default()).contains("class=\"tile\" href=\"/cards\""));
+        }
+        assert!(
+            cards(&member, Features::default(), None).contains("Cards storage is not configured.")
+        );
+        let empty = cards(&member, Features::default(), Some(&[]));
+        assert!(empty.contains("No cards yet."));
+        assert!(empty.contains("/static/cards.js?v="));
+        let item = Card {
+            id: 7,
+            name: "<Library & \"ID\">".into(),
+            path: "x.png".into(),
+            mime: "image/png".into(),
+            sha256: "a".repeat(64),
+        };
+        let detail = card(&member, Features::default(), &item, &item.name, None);
+        assert!(detail.contains("src=\"/cards/7/original\""));
+        assert!(detail.contains("action=\"/cards/7/name\""));
+        assert!(detail.contains("value=\"&lt;Library &amp; &quot;ID&quot;&gt;\""));
+        assert!(!detail.contains("<Library"));
+        let grid = cards(&member, Features::default(), Some(&[item]));
+        assert!(grid.contains("side-link active\" href=\"/cards\""));
+        assert!(grid.contains("href=\"/cards/7\""));
+        assert!(grid.contains("src=\"/cards/7/thumb\""));
+        assert!(grid.contains("&lt;Library &amp; &quot;ID&quot;&gt;"));
+        assert!(!grid.contains("<Library"));
+        assert!(!grid.contains("Delete"));
     }
 
     #[test]

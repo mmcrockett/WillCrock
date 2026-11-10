@@ -5,6 +5,10 @@ const MAX_BODY: u64 = 64 * 1024;
 pub const MAX_PHOTO_SIZE: usize = 25 * 1024 * 1024;
 const MAX_PHOTO_BODY: u64 = MAX_PHOTO_SIZE as u64 + 64 * 1024;
 
+fn is_image_upload(method: &str, path: &str) -> bool {
+    method == "POST" && matches!(path, "/photos/upload" | "/cards/upload")
+}
+
 fn boundary_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(
@@ -184,7 +188,7 @@ impl Req {
         let uri = req.param("REQUEST_URI").unwrap_or_default();
         let (path, uri_query) = split_uri(&uri);
         let query = req.param("QUERY_STRING").unwrap_or(uri_query);
-        let is_upload = method == "POST" && path == "/photos/upload";
+        let is_upload = is_image_upload(&method, &path);
         let limit = if is_upload { MAX_PHOTO_BODY } else { MAX_BODY };
         let (body, body_error) = read_body(req.stdin(), limit);
         let form = if is_upload || body_error.is_some() {
@@ -384,6 +388,25 @@ mod tests {
     fn body_limit_reports_truncation() {
         assert_eq!(read_body(&b"abc"[..], 3), (b"abc".to_vec(), None));
         assert_eq!(read_body(&b"abcd"[..], 3).1, Some(413));
+    }
+
+    #[test]
+    fn only_exact_image_upload_routes_get_the_large_body_allowance() {
+        for path in ["/photos/upload", "/cards/upload"] {
+            assert!(is_image_upload("POST", path));
+            assert!(!is_image_upload("GET", path));
+        }
+        for path in [
+            "/cards",
+            "/cards/1/name",
+            "/cards/upload/extra",
+            "/other/upload",
+        ] {
+            assert!(!is_image_upload("POST", path));
+        }
+        let body = vec![0; MAX_BODY as usize + 1];
+        assert_eq!(read_body(body.as_slice(), MAX_BODY).1, Some(413));
+        assert_eq!(read_body(body.as_slice(), MAX_PHOTO_BODY).1, None);
     }
 
     #[test]

@@ -264,6 +264,29 @@ body {
   opacity: 0.45;
 }
 
+.cards-grid {
+  justify-content: flex-start;
+}
+
+.cards-grid .tile {
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.cards-grid .tile-box img {
+  width: 100%;
+  height: 100%;
+  padding: 0.5rem;
+  object-fit: contain;
+  border-radius: inherit;
+}
+
+.card-picture {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
 .tile.locked:hover .tile-box {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
   transform: none;

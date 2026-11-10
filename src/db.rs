@@ -191,6 +191,16 @@ CREATE TABLE pending_photo_moves (
   sha256 TEXT NOT NULL
 );
 ",
+    "
+CREATE TABLE cards (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+  path TEXT NOT NULL UNIQUE,
+  mime TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
