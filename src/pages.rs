@@ -391,6 +391,9 @@ pub fn card(
              <label class=\"form-label\" for=\"card-name\">Name</label>\
              <input class=\"form-control mb-3\" id=\"card-name\" name=\"name\" value=\"{name}\" required>\
              <div><button class=\"btn btn-primary\">Save name</button></div></form>\
+             <form method=\"post\" action=\"/cards/{id}/delete\" class=\"mt-3\" \
+             onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"Delete this card and its image? This cannot be undone.\">\
+             <button class=\"btn btn-outline-danger\">Delete card</button></form>\
              <script src=\"{script}\" defer></script>",
             page_title(&card.name),
             id = card.id,
@@ -1706,6 +1709,8 @@ mod tests {
         assert!(detail.contains("id=\"card-picture\" class=\"card-picture\""));
         assert!(detail.contains("/static/cards.js?v="));
         assert!(detail.contains("action=\"/cards/7/name\""));
+        assert!(detail.contains("action=\"/cards/7/delete\""));
+        assert!(detail.contains("return confirm(this.dataset.msg)"));
         assert!(detail.contains("value=\"&lt;Library &amp; &quot;ID&quot;&gt;\""));
         assert!(!detail.contains("<Library"));
         let grid = cards(&member, Features::default(), Some(&[item]));

@@ -141,6 +141,42 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> rusqlite::Result<usize>
     )
 }
 
+pub fn delete(conn: &Connection, root: &Path, id: i64) -> Result<bool, String> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let Some(card) = get(&tx, id).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    let mut components = Path::new(&card.path).components();
+    let Some(Component::Normal(filename)) = components.next() else {
+        return Err("invalid card image path".into());
+    };
+    if components.next().is_some() {
+        return Err("invalid card image path".into());
+    }
+
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let path = root.join(filename);
+    let file_exists = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => true,
+        Ok(_) => return Err("card image path is not a file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if tx
+        .execute("DELETE FROM cards WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?
+        != 1
+    {
+        return Ok(false);
+    }
+    if file_exists {
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 pub fn upload(
     conn: &Connection,
     root: &Path,
@@ -312,6 +348,43 @@ pub mod tests {
         assert!(list(&conn).unwrap().is_empty());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_card_record_and_image() {
+        let root = temp_dir();
+        let conn = db::open_memory();
+        let id = upload(&conn, &root, "Card", &image(image::ImageFormat::Png), 100).unwrap();
+        let path = root.join(get(&conn, id).unwrap().unwrap().path);
+
+        assert!(delete(&conn, &root, id).unwrap());
+        assert!(get(&conn, id).unwrap().is_none());
+        assert!(!path.exists());
+        assert!(!delete(&conn, &root, id).unwrap());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_rejects_paths_outside_card_storage() {
+        let root = temp_dir();
+        let outside = temp_dir();
+        let conn = db::open_memory();
+        let id = upload(&conn, &root, "Card", &image(image::ImageFormat::Png), 100).unwrap();
+        let secret = outside.join("outside.png");
+        fs::write(&secret, b"private").unwrap();
+        conn.execute(
+            "UPDATE cards SET path = ?1 WHERE id = ?2",
+            params![secret.to_string_lossy(), id],
+        )
+        .unwrap();
+
+        assert!(delete(&conn, &root, id).is_err());
+        assert!(get(&conn, id).unwrap().is_some());
+        assert_eq!(fs::read(secret).unwrap(), b"private");
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
