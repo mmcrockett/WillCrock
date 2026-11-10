@@ -1,5 +1,5 @@
 use super::add_date_tags;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Write};
@@ -173,7 +173,7 @@ pub fn upload(
         .canonicalize()
         .map_err(|e| io_error("photo directory", e))?;
     let hash = format!("{:x}", Sha256::digest(bytes));
-    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let tx = super::photo_transaction(conn, &root).map_err(UploadError::Failed)?;
     let duplicate = {
         let mut stmt = tx.prepare(
             "SELECT id, taken_on, path FROM photos WHERE sha256 = ?1 AND missing_at IS NULL",
@@ -213,7 +213,9 @@ pub fn upload(
         });
     }
 
-    let dir = root.join("uploads");
+    let album = super::month_album(&date)
+        .ok_or_else(|| UploadError::Failed(format!("invalid photo date: {date}")))?;
+    let dir = root.join(&album);
     std::fs::create_dir_all(&dir).map_err(|e| io_error("create upload directory", e))?;
     let dir = dir
         .canonicalize()
@@ -233,7 +235,7 @@ pub fn upload(
         .collect();
     let stem = if stem.is_empty() { "photo" } else { &stem };
     let name = format!("{stem}-{:032x}.{ext}", rand::random::<u128>());
-    let rel = format!("uploads/{name}");
+    let rel = format!("{album}/{name}");
     let path = dir.join(&name);
     let tmp = dir.join(format!(".{name}.tmp"));
     let mut created = false;
@@ -258,8 +260,8 @@ pub fn upload(
         let database_result = (|| -> Result<i64, UploadError> {
             tx.execute(
                 "INSERT INTO photos (path, album, size, mtime, sha256, taken_on, created_at) \
-                 VALUES (?1, 'uploads', ?2, ?3, ?4, ?5, ?6)",
-                params![rel, bytes.len() as i64, mtime, hash, date, now],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![rel, album, bytes.len() as i64, mtime, hash, date, now],
             )?;
             let id = tx.last_insert_rowid();
             add_date_tags(&tx, id, &date)?;
@@ -286,37 +288,52 @@ pub fn upload(
     })
 }
 
-pub fn change_date(conn: &Connection, id: i64, month: &str) -> Result<bool, UploadError> {
+pub fn change_date(
+    conn: &Connection,
+    root: &Path,
+    id: i64,
+    month: &str,
+) -> Result<bool, UploadError> {
     if !month_valid(month) {
         return Err(UploadError::Invalid("Choose a valid year and month."));
     }
-    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let old = tx
+    let root = root
+        .canonicalize()
+        .map_err(|e| io_error("photo directory", e))?;
+    let tx = super::photo_transaction(conn, &root).map_err(UploadError::Failed)?;
+    let photo = tx
         .query_row(
-            "SELECT taken_on FROM photos WHERE id = ?1 AND missing_at IS NULL",
+            "SELECT taken_on, path FROM photos WHERE id = ?1 AND missing_at IS NULL",
             [id],
-            |r| r.get::<_, Option<String>>(0),
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
         )
         .optional()?;
-    let Some(old) = old else {
+    let Some((old_date, old_path)) = photo else {
         return Ok(false);
     };
-    if let Some(old) = old {
-        if old.get(..7) == Some(month) {
-            return Ok(true);
+    if old_date.as_deref().and_then(|date| date.get(..7)) == Some(month) {
+        return Ok(true);
+    }
+
+    if super::month_album(month).as_deref() == Some(super::album_of(&old_path)) {
+        if let Some(old) = &old_date {
+            tx.execute(
+                "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id IN \
+                 (SELECT id FROM tags WHERE name IN (?2, ?3))",
+                params![id, old.get(..4).unwrap_or(""), old.get(..7).unwrap_or("")],
+            )?;
         }
         tx.execute(
-            "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id IN \
-             (SELECT id FROM tags WHERE name IN (?2, ?3))",
-            params![id, old.get(..4).unwrap_or(""), old.get(..7).unwrap_or("")],
+            "UPDATE photos SET taken_on = ?1 WHERE id = ?2",
+            params![month, id],
         )?;
+        add_date_tags(&tx, id, month)?;
+        tx.commit()?;
+        return Ok(true);
     }
-    tx.execute(
-        "UPDATE photos SET taken_on = ?1 WHERE id = ?2",
-        params![month, id],
-    )?;
-    add_date_tags(&tx, id, month)?;
+    super::queue_photo_move(&tx, &root, id, &old_path, month).map_err(UploadError::Failed)?;
     tx.commit()?;
+    super::recover_photo_moves(conn, &root).map_err(UploadError::Failed)?;
     Ok(true)
 }
 
@@ -372,6 +389,13 @@ mod tests {
         assert_eq!(first.date.as_deref(), Some("2018-03-15"));
         assert_eq!(first.date_source, "metadata");
         assert!(!first.duplicate);
+        let path: String = conn
+            .query_row("SELECT path FROM photos WHERE id = ?1", [first.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(path.starts_with("2018/20180300/"));
+        assert!(root.join(&path).is_file());
         let duplicate = upload(&conn, &root, "another.jpg", &bytes, 1_793_831_400).unwrap();
         assert_eq!(duplicate.id, first.id);
         assert!(duplicate.duplicate);
@@ -383,12 +407,20 @@ mod tests {
             [first.id],
         )
         .unwrap();
-        assert!(change_date(&conn, first.id, "2020-05").unwrap());
+        assert!(change_date(&conn, &root, first.id, "2020-05").unwrap());
+        let corrected: String = conn
+            .query_row("SELECT path FROM photos WHERE id = ?1", [first.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(corrected.starts_with("2020/20200500/"));
+        assert!(root.join(&corrected).is_file());
+        assert!(!root.join(&path).exists());
         assert!(matches!(
-            change_date(&conn, first.id, "2020-13"),
+            change_date(&conn, &root, first.id, "2020-13"),
             Err(UploadError::Invalid(_))
         ));
-        assert!(!change_date(&conn, 999, "2020-05").unwrap());
+        assert!(!change_date(&conn, &root, 999, "2020-05").unwrap());
         photos::scan(&mut conn, &root, 100).unwrap();
         let date: String = conn
             .query_row(
@@ -414,6 +446,74 @@ mod tests {
             photos::tag_view(&conn, &["2018".into()], 1).unwrap().total,
             0
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_uploads_use_month_buckets_and_legacy_uploads_migrate_once() {
+        let root = std::env::temp_dir().join(format!("photo-upload-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let mut conn = db::open_memory();
+        let uploaded = upload(&conn, &root, "phone.jpg", &jpeg(false), 1_793_831_400).unwrap();
+        let path: String = conn
+            .query_row(
+                "SELECT path FROM photos WHERE id = ?1",
+                [uploaded.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let date = uploaded.date.as_deref().unwrap();
+        let month_folder = format!("{}/{}00", &date[..4], date[..7].replace('-', ""));
+        assert!(path.starts_with(&format!("{month_folder}/")));
+
+        let legacy = root.join("uploads/legacy-123.jpg");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let bytes = jpeg(false);
+        std::fs::write(&legacy, &bytes).unwrap();
+        let metadata = std::fs::metadata(&legacy).unwrap();
+        let mtime = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO photos (path, album, size, mtime, sha256, taken_on, created_at) \
+             VALUES ('uploads/legacy-123.jpg', 'uploads', ?1, ?2, ?3, '2018-03-15', 0)",
+            params![
+                metadata.len() as i64,
+                mtime,
+                format!("{:x}", Sha256::digest(&bytes))
+            ],
+        )
+        .unwrap();
+        let legacy_id = conn.last_insert_rowid();
+
+        assert_eq!(photos::migrate_uploads(&mut conn, &root).unwrap(), 1);
+        assert_eq!(photos::migrate_uploads(&mut conn, &root).unwrap(), 0);
+        let migrated: (String, String) = conn
+            .query_row(
+                "SELECT path, album FROM photos WHERE id = ?1",
+                [legacy_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            migrated,
+            (
+                "2018/20180300/legacy-123.jpg".into(),
+                "2018/20180300".into()
+            )
+        );
+        assert!(!legacy.exists());
+        assert!(root.join(&migrated.0).is_file());
+        let report = photos::scan(&mut conn, &root, 100).unwrap();
+        assert_eq!(report.unchanged, 2);
+        assert_eq!(report.added + report.missing, 0);
+        let move_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM photo_moves", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(move_count, 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 

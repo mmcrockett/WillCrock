@@ -172,6 +172,25 @@ CREATE UNIQUE INDEX recipes_name ON recipes(name COLLATE NOCASE);
     "
 ALTER TABLE recipes ADD COLUMN archived_at INTEGER;
 ",
+    "
+CREATE TABLE photo_moves (
+  photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+  old_path TEXT NOT NULL,
+  new_path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  PRIMARY KEY (photo_id, old_path)
+);
+CREATE INDEX photo_moves_old_path ON photo_moves(old_path);
+",
+    "
+CREATE TABLE pending_photo_moves (
+  photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+  old_path TEXT NOT NULL UNIQUE,
+  new_path TEXT NOT NULL UNIQUE,
+  taken_on TEXT NOT NULL,
+  sha256 TEXT NOT NULL
+);
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {

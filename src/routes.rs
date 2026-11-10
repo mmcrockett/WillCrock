@@ -150,7 +150,8 @@ fn authed(
                 ));
             };
             let month = req.form.get("month").map(String::as_str).unwrap_or("");
-            Ok(match photos::change_date(conn, id, month) {
+            let root = std::path::Path::new(&cfg.photos.as_ref().expect("checked above").dir);
+            Ok(match photos::change_date(conn, root, id, month) {
                 Ok(true) => Resp::json(200, &serde_json::json!({"date": month})),
                 Ok(false) => Resp::json(404, &serde_json::json!({"error": "Photo not found."})),
                 Err(error) => photo_upload_error(error),
