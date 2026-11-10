@@ -1,4 +1,4 @@
-use super::Photo;
+use super::{Photo, Visibility};
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -57,12 +57,7 @@ pub fn create(
 ) -> rusqlite::Result<Option<Album>> {
     let tx = conn.unchecked_transaction()?;
     for id in &input.photo_ids {
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM photos WHERE id = ?1 AND missing_at IS NULL)",
-            [id],
-            |r| r.get(0),
-        )?;
-        if !exists {
+        if !super::visible(&tx, *id, Visibility::Restricted)? {
             return Ok(None);
         }
     }
@@ -120,17 +115,23 @@ pub fn get(conn: &Connection, token: &str, now: i64) -> rusqlite::Result<Option<
 
 pub fn contains(conn: &Connection, album_id: i64, photo_id: i64) -> rusqlite::Result<bool> {
     conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM shared_album_photos WHERE album_id = ?1 AND photo_id = ?2)",
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM shared_album_photos ap \
+             JOIN photos p ON p.id = ap.photo_id \
+             WHERE ap.album_id = ?1 AND p.id = ?2 AND p.missing_at IS NULL AND {})",
+            Visibility::Restricted.sql()
+        ),
         params![album_id, photo_id],
         |r| r.get(0),
     )
 }
 
 pub fn photos(conn: &Connection, album_id: i64) -> rusqlite::Result<Vec<Photo>> {
-    conn.prepare(
+    conn.prepare(&format!(
         "SELECT p.id, p.path FROM shared_album_photos ap JOIN photos p ON p.id = ap.photo_id \
-         WHERE ap.album_id = ?1 AND p.missing_at IS NULL ORDER BY ap.position",
-    )?
+         WHERE ap.album_id = ?1 AND p.missing_at IS NULL AND {} ORDER BY ap.position",
+        Visibility::Restricted.sql()
+    ))?
     .query_map([album_id], |r| {
         Ok(Photo {
             id: r.get(0)?,

@@ -14,6 +14,47 @@ pub use images::{image_file, ImageKind};
 pub use upload::{change_date, upload, UploadError};
 
 const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "gif", "heic", "webp"];
+pub const ADMIN_ONLY_TAG: &str = "admin-only";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    Admin,
+    Restricted,
+}
+
+impl Visibility {
+    pub fn for_user(user: &crate::auth::User) -> Self {
+        if user.is_admin {
+            Self::Admin
+        } else {
+            Self::Restricted
+        }
+    }
+
+    // Callers alias the photos table as p.
+    pub fn sql(self) -> String {
+        match self {
+            Self::Admin => "1".into(),
+            Self::Restricted => format!(
+                "NOT EXISTS (SELECT 1 FROM photo_tags private_pt \
+                 JOIN tags private_t ON private_t.id = private_pt.tag_id \
+                 WHERE private_pt.photo_id = p.id AND private_t.name = '{ADMIN_ONLY_TAG}')"
+            ),
+        }
+    }
+}
+
+pub fn visible(conn: &Connection, id: i64, visibility: Visibility) -> rusqlite::Result<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM photos p \
+             WHERE p.id = ?1 AND p.missing_at IS NULL AND {})",
+            visibility.sql()
+        ),
+        [id],
+        |r| r.get(0),
+    )
+}
 
 #[derive(Debug, Default, PartialEq)]
 pub struct ScanReport {
@@ -360,15 +401,21 @@ const LIVE_WITH_ALL_TAGS: &str = "SELECT p.id FROM photos p WHERE p.missing_at I
      (SELECT COUNT(*) FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
       WHERE pt.photo_id = p.id AND t.name IN ({in})) = {n}";
 
-fn live_with_all_tags(tags: &[String]) -> String {
+fn live_with_all_tags(tags: &[String], visibility: Visibility) -> String {
     let marks = vec!["?"; tags.len()].join(",");
-    LIVE_WITH_ALL_TAGS
+    let ids = LIVE_WITH_ALL_TAGS
         .replace("{in}", &marks)
-        .replace("{n}", &tags.len().to_string())
+        .replace("{n}", &tags.len().to_string());
+    format!("{ids} AND {}", visibility.sql())
 }
 
-pub fn tag_view(conn: &Connection, tags: &[String], page: i64) -> rusqlite::Result<TagView> {
-    let ids = live_with_all_tags(tags);
+pub fn tag_view(
+    conn: &Connection,
+    tags: &[String],
+    page: i64,
+    visibility: Visibility,
+) -> rusqlite::Result<TagView> {
+    let ids = live_with_all_tags(tags, visibility);
     let args = || rusqlite::params_from_iter(tags.iter());
     let marks = vec!["?"; tags.len()].join(",");
     let mut stmt = conn.prepare(&format!(
@@ -418,12 +465,13 @@ pub fn tag_view(conn: &Connection, tags: &[String], page: i64) -> rusqlite::Resu
             .filter(|tag| !is_year_tag(tag) && !is_month_tag(tag))
             .collect();
     }
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT DISTINCT t.name FROM tags t \
          JOIN photo_tags pt ON pt.tag_id = t.id \
          JOIN photos p ON p.id = pt.photo_id \
-         WHERE p.missing_at IS NULL ORDER BY t.name",
-    )?;
+         WHERE p.missing_at IS NULL AND {} ORDER BY t.name",
+        visibility.sql()
+    ))?;
     let known_tags = stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?
@@ -458,17 +506,36 @@ pub fn parse_tags(raw: &str) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-pub fn set_tags(conn: &Connection, photo_id: i64, names: &[String]) -> rusqlite::Result<bool> {
-    let tx = conn.unchecked_transaction()?;
+#[derive(Debug, PartialEq)]
+pub enum TagUpdate {
+    Saved,
+    NotFound,
+    ReservedTag,
+}
+
+pub fn set_tags(
+    conn: &Connection,
+    photo_id: i64,
+    names: &[String],
+    visibility: Visibility,
+) -> rusqlite::Result<TagUpdate> {
+    if visibility == Visibility::Restricted && names.iter().any(|name| name == ADMIN_ONLY_TAG) {
+        return Ok(TagUpdate::ReservedTag);
+    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     let Some(taken_on) = tx
         .query_row(
-            "SELECT taken_on FROM photos WHERE id = ?1 AND missing_at IS NULL",
+            &format!(
+                "SELECT taken_on FROM photos p \
+                 WHERE p.id = ?1 AND p.missing_at IS NULL AND {}",
+                visibility.sql()
+            ),
             [photo_id],
             |r| r.get::<_, Option<String>>(0),
         )
         .optional()?
     else {
-        return Ok(false);
+        return Ok(TagUpdate::NotFound);
     };
     let (year, month) = taken_on
         .as_deref()
@@ -488,7 +555,7 @@ pub fn set_tags(conn: &Connection, photo_id: i64, names: &[String]) -> rusqlite:
         add_tag(&tx, photo_id, name)?;
     }
     tx.commit()?;
-    Ok(true)
+    Ok(TagUpdate::Saved)
 }
 
 pub fn run(args: &[String]) {
@@ -638,12 +705,13 @@ pub fn acknowledge_photo_moves(
     Ok(acknowledged)
 }
 
-pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
-    let mut stmt = conn.prepare(
+pub fn summary(conn: &Connection, visibility: Visibility) -> rusqlite::Result<Summary> {
+    let visible = visibility.sql();
+    let mut stmt = conn.prepare(&format!(
         "SELECT t.name, COUNT(*) FROM photo_tags pt \
          JOIN tags t ON t.id = pt.tag_id JOIN photos p ON p.id = pt.photo_id \
-         WHERE p.missing_at IS NULL GROUP BY t.id ORDER BY t.name",
-    )?;
+         WHERE p.missing_at IS NULL AND {visible} GROUP BY t.id ORDER BY t.name"
+    ))?;
     let counts = stmt
         .query_map([], |r| {
             Ok(TagCount {
@@ -658,23 +726,28 @@ pub fn summary(conn: &Connection) -> rusqlite::Result<Summary> {
         .partition(|t| is_year_tag(&t.name));
     years.reverse();
     let total = conn.query_row(
-        "SELECT COUNT(*) FROM photos WHERE missing_at IS NULL",
+        &format!("SELECT COUNT(*) FROM photos p WHERE missing_at IS NULL AND {visible}"),
         [],
         |r| r.get(0),
     )?;
     let untagged = conn.query_row(
-        "SELECT COUNT(*) FROM photos p WHERE p.missing_at IS NULL \
-         AND NOT EXISTS (SELECT 1 FROM photo_tags WHERE photo_id = p.id)",
+        &format!(
+            "SELECT COUNT(*) FROM photos p WHERE p.missing_at IS NULL AND {visible} \
+             AND NOT EXISTS (SELECT 1 FROM photo_tags WHERE photo_id = p.id)"
+        ),
         [],
         |r| r.get(0),
     )?;
     let missing = conn.query_row(
-        "SELECT COUNT(*) FROM photos WHERE missing_at IS NOT NULL",
+        &format!("SELECT COUNT(*) FROM photos p WHERE missing_at IS NOT NULL AND {visible}"),
         [],
         |r| r.get(0),
     )?;
     let unsynced = conn.query_row(
-        "SELECT COUNT(*) FROM photos WHERE missing_at IS NULL AND synced_at IS NULL",
+        &format!(
+            "SELECT COUNT(*) FROM photos p \
+             WHERE missing_at IS NULL AND synced_at IS NULL AND {visible}"
+        ),
         [],
         |r| r.get(0),
     )?;
@@ -952,7 +1025,7 @@ mod tests {
                 ..Default::default()
             }
         );
-        let s = summary(&conn).unwrap();
+        let s = summary(&conn, Visibility::Admin).unwrap();
         assert_eq!(s.total, 3);
         assert_eq!(s.untagged, 1);
         let years: Vec<_> = s.years.iter().map(|t| (t.name.as_str(), t.count)).collect();
@@ -966,14 +1039,20 @@ mod tests {
         let root = library("tagview");
         let mut conn = db::open_memory();
         scan(&mut conn, &root, 100).unwrap();
-        let year = tag_view(&conn, &["2018".to_string()], 1).unwrap();
+        let year = tag_view(&conn, &["2018".to_string()], 1, Visibility::Admin).unwrap();
         assert_eq!(year.total, 2);
         let months: Vec<_> = year.subtags.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(months, vec!["2018-03", "2018-09"]);
-        let month = tag_view(&conn, &["2018".to_string(), "2018-03".to_string()], 1).unwrap();
+        let month = tag_view(
+            &conn,
+            &["2018".to_string(), "2018-03".to_string()],
+            1,
+            Visibility::Admin,
+        )
+        .unwrap();
         assert_eq!(month.photos[0].path, "2018/20180315_RedRiverTrip/IMG_1.JPG");
         assert!(month.subtags.is_empty());
-        let none = tag_view(&conn, &["nope".to_string()], 1).unwrap();
+        let none = tag_view(&conn, &["nope".to_string()], 1, Visibility::Admin).unwrap();
         assert_eq!(none.total, 0);
         fs::remove_dir_all(root).unwrap();
     }
@@ -998,15 +1077,116 @@ mod tests {
         .unwrap();
         tx.commit().unwrap();
         let tags = ["family".to_string()];
-        let first = tag_view(&conn, &tags, 1).unwrap();
-        let last = tag_view(&conn, &tags, i64::MAX).unwrap();
+        let first = tag_view(&conn, &tags, 1, Visibility::Admin).unwrap();
+        let last = tag_view(&conn, &tags, i64::MAX, Visibility::Admin).unwrap();
         assert_eq!(first.total, 64);
         assert_eq!(first.photos.len(), 60);
         assert_eq!(last.page, 2);
         assert_eq!(last.photos.len(), 4);
         assert_eq!(first.photos[59].path, "059.jpg");
         assert_eq!(last.photos[0].path, "060.jpg");
-        assert_eq!(tag_view(&conn, &["nope".into()], 100).unwrap().page, 1);
+        assert_eq!(
+            tag_view(&conn, &["nope".into()], 100, Visibility::Admin)
+                .unwrap()
+                .page,
+            1
+        );
+    }
+
+    #[test]
+    fn admin_only_filters_metadata_and_pagination_before_counting() {
+        let mut conn = db::open_memory();
+        let tx = conn.transaction().unwrap();
+        for id in 1..=70 {
+            tx.execute(
+                "INSERT INTO photos (id, path, album, size, mtime, sha256, created_at) \
+                 VALUES (?1, ?2, '', 1, 0, 'hash', 0)",
+                params![id, format!("{id:03}.jpg")],
+            )
+            .unwrap();
+            add_tag(&tx, id, "family").unwrap();
+            if id <= 5 || id == 70 {
+                for tag in [ADMIN_ONLY_TAG, "secret", "1999", "1999-01"] {
+                    add_tag(&tx, id, tag).unwrap();
+                }
+            }
+        }
+        tx.execute("UPDATE photos SET missing_at = 1 WHERE id = 70", [])
+            .unwrap();
+        tx.execute(
+            "INSERT INTO photos (path, album, size, mtime, sha256, created_at) \
+             VALUES ('untagged.jpg', '', 1, 0, 'hash', 0)",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let s = summary(&conn, Visibility::Restricted).unwrap();
+        assert_eq!((s.total, s.untagged, s.missing, s.unsynced), (65, 1, 0, 65));
+        assert!(s.years.is_empty());
+        assert_eq!(s.other_tags.len(), 1);
+        assert_eq!(
+            (s.other_tags[0].name.as_str(), s.other_tags[0].count),
+            ("family", 64)
+        );
+        let admin = summary(&conn, Visibility::Admin).unwrap();
+        assert_eq!((admin.total, admin.missing, admin.unsynced), (70, 1, 70));
+        assert_eq!(
+            (admin.years[0].name.as_str(), admin.years[0].count),
+            ("1999", 5)
+        );
+
+        let tags = ["family".into()];
+        let first = tag_view(&conn, &tags, 1, Visibility::Restricted).unwrap();
+        let last = tag_view(&conn, &tags, i64::MAX, Visibility::Restricted).unwrap();
+        assert_eq!((first.total, first.photos.len()), (64, 60));
+        assert_eq!((last.page, last.photos.len()), (2, 4));
+        assert_eq!(first.photos[0].path, "006.jpg");
+        assert_eq!(last.photos[0].path, "066.jpg");
+        assert!(first.subtags.is_empty());
+        assert_eq!(first.known_tags, ["family"]);
+        let hidden = tag_view(&conn, &["secret".into()], 1, Visibility::Restricted).unwrap();
+        assert_eq!(hidden.total, 0);
+        assert!(hidden.photos.is_empty());
+        let admin = tag_view(&conn, &tags, 1, Visibility::Admin).unwrap();
+        assert_eq!(admin.total, 69);
+        assert!(admin.known_tags.contains(&"secret".into()));
+        assert!(admin
+            .subtags
+            .iter()
+            .any(|tag| tag.name == ADMIN_ONLY_TAG && tag.count == 5));
+    }
+
+    #[test]
+    fn only_admin_tag_updates_can_hide_or_unhide_photos() {
+        let conn = db::open_memory();
+        conn.execute(
+            "INSERT INTO photos (path, album, size, mtime, sha256, taken_on, created_at) \
+             VALUES ('one.jpg', '', 1, 0, 'hash', '2026-11', 0)",
+            [],
+        )
+        .unwrap();
+        let tags = parse_tags("family, ADMIN-ONLY ").unwrap();
+        assert_eq!(
+            set_tags(&conn, 1, &tags, Visibility::Restricted).unwrap(),
+            TagUpdate::ReservedTag
+        );
+        assert!(visible(&conn, 1, Visibility::Restricted).unwrap());
+        assert_eq!(
+            set_tags(&conn, 1, &tags, Visibility::Admin).unwrap(),
+            TagUpdate::Saved
+        );
+        assert_eq!(
+            set_tags(&conn, 1, &[], Visibility::Restricted).unwrap(),
+            TagUpdate::NotFound
+        );
+        assert!(!visible(&conn, 1, Visibility::Restricted).unwrap());
+        assert!(visible(&conn, 1, Visibility::Admin).unwrap());
+        assert_eq!(
+            set_tags(&conn, 1, &["family".into()], Visibility::Admin).unwrap(),
+            TagUpdate::Saved
+        );
+        assert!(visible(&conn, 1, Visibility::Restricted).unwrap());
     }
 
     #[test]
@@ -1022,7 +1202,7 @@ mod tests {
         let tx = conn.transaction().unwrap();
         add_tag(&tx, id, "mike").unwrap();
         tx.commit().unwrap();
-        let s = summary(&conn).unwrap();
+        let s = summary(&conn, Visibility::Admin).unwrap();
         assert_eq!(s.other_tags.len(), 1);
         assert_eq!(s.other_tags[0].name, "mike");
         assert_eq!(s.untagged, 0);
@@ -1059,13 +1239,13 @@ mod tests {
         fs::remove_file(root.join("mike.jpg")).unwrap();
         let r = scan(&mut conn, &root, 200).unwrap();
         assert_eq!((r.missing, r.unchanged), (1, 2));
-        assert_eq!(summary(&conn).unwrap().missing, 1);
+        assert_eq!(summary(&conn, Visibility::Admin).unwrap().missing, 1);
         let again = scan(&mut conn, &root, 300).unwrap();
         assert_eq!(again.missing, 0);
         write(&root, "mike.jpg", "a");
         let back = scan(&mut conn, &root, 400).unwrap();
         assert_eq!(back.changed + back.unchanged, 3);
-        assert_eq!(summary(&conn).unwrap().missing, 0);
+        assert_eq!(summary(&conn, Visibility::Admin).unwrap().missing, 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1085,7 +1265,7 @@ mod tests {
         let mut conn = db::open_memory();
         scan(&mut conn, &root, 100).unwrap();
         assert_eq!(unsynced(&conn).unwrap().len(), 3);
-        assert_eq!(summary(&conn).unwrap().unsynced, 3);
+        assert_eq!(summary(&conn, Visibility::Admin).unwrap().unsynced, 3);
         let m = mtime_of(&root, "mike.jpg");
         let manifest =
             format!("mike.jpg\t1\t{m}\n2018/20180315_RedRiverTrip/IMG_1.JPG\t99\t{m}\n\n");
@@ -1098,7 +1278,7 @@ mod tests {
                 "2018/20180900/IMG_2.resize.jpg"
             ]
         );
-        assert_eq!(summary(&conn).unwrap().unsynced, 2);
+        assert_eq!(summary(&conn, Visibility::Admin).unwrap().unsynced, 2);
         assert!(mark_synced(&mut conn, "garbage\n".as_bytes(), 500).is_err());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1214,7 +1394,7 @@ mod tests {
                 if legacy {
                     migrate_uploads(&mut conn, &root).unwrap();
                 } else {
-                    assert!(change_date(&conn, &root, id, date).unwrap());
+                    assert!(change_date(&conn, &root, id, date, Visibility::Admin).unwrap());
                 }
                 let report = scan(&mut conn, &root, 200).unwrap();
                 assert_eq!(report.added + report.missing, 0);
@@ -1231,14 +1411,29 @@ mod tests {
                     (id, new_path.into(), album_of(new_path).into(), date.into())
                 );
                 assert_eq!(albums::photos(&conn, album.id).unwrap()[0].id, id);
-                assert_eq!(tag_view(&conn, &["family".into()], 1).unwrap().total, 1);
-                if !legacy {
-                    assert_eq!(tag_view(&conn, &["2018".into()], 1).unwrap().total, 0);
-                }
                 assert_eq!(
-                    tag_view(&conn, &[date[..4].into(), date[..7].into()], 1)
+                    tag_view(&conn, &["family".into()], 1, Visibility::Admin)
                         .unwrap()
                         .total,
+                    1
+                );
+                if !legacy {
+                    assert_eq!(
+                        tag_view(&conn, &["2018".into()], 1, Visibility::Admin)
+                            .unwrap()
+                            .total,
+                        0
+                    );
+                }
+                assert_eq!(
+                    tag_view(
+                        &conn,
+                        &[date[..4].into(), date[..7].into()],
+                        1,
+                        Visibility::Admin
+                    )
+                    .unwrap()
+                    .total,
                     1
                 );
                 let pending: i64 = conn

@@ -1074,6 +1074,9 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
     let known_tag_options = view
         .known_tags
         .iter()
+        .map(String::as_str)
+        .filter(|tag| *tag != photos::ADMIN_ONLY_TAG)
+        .chain(user.is_admin.then_some(photos::ADMIN_ONLY_TAG))
         .map(|tag| {
             format!(
                 "<label class=\"photo-tag-option\"><input class=\"visually-hidden\" \
@@ -1088,7 +1091,7 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
     } else {
         known_tag_options
     };
-    let tiles = photo_tiles(&view.photos, "/photos/i", Some(&return_to));
+    let tiles = photo_tiles(&view.photos, "/photos/i", Some(&return_to), user.is_admin);
     let mut pagination = String::new();
     if view.page > 1 {
         pagination.push_str(&format!(
@@ -1146,19 +1149,33 @@ pub fn photo_tag_view(user: &User, features: Features, view: &photos::TagView) -
     )
 }
 
-fn photo_tiles(photos: &[photos::Photo], prefix: &str, return_to: Option<&str>) -> String {
+fn photo_tiles(
+    photos: &[photos::Photo],
+    prefix: &str,
+    return_to: Option<&str>,
+    is_admin: bool,
+) -> String {
     photos
         .iter()
         .map(|p| {
             let filename = p.path.rsplit('/').next().unwrap_or(&p.path);
             let controls = return_to
                 .map(|return_to| {
+                    let share = if p.tags.iter().any(|tag| tag == photos::ADMIN_ONLY_TAG) {
+                        String::new()
+                    } else {
+                        format!(
+                            "<label class=\"form-check m-2\"><input class=\"form-check-input\" type=\"checkbox\" \
+                             name=\"photo_{id}\" value=\"1\" form=\"share-album\" data-share-photo=\"{id}\"> \
+                             Select for album</label>",
+                            id = p.id,
+                        )
+                    };
+                    let action_prefix = if is_admin { "/admin/photos/i" } else { "/photos/i" };
                     format!(
-                        "<label class=\"form-check m-2\"><input class=\"form-check-input\" type=\"checkbox\" \
-                         name=\"photo_{id}\" value=\"1\" form=\"share-album\" data-share-photo=\"{id}\"> \
-                         Select for album</label>\
+                        "{share}\
                          <button class=\"photo-tag-button\" type=\"button\" data-tag-picker \
-                         data-action=\"/photos/i/{id}/tags\" data-return-to=\"{return_to}\" data-tags=\"{tags}\" \
+                         data-action=\"{action_prefix}/{id}/tags\" data-return-to=\"{return_to}\" data-tags=\"{tags}\" \
                          aria-label=\"Edit tags for {caption}\" title=\"Edit tags\">+</button>",
                         id = p.id,
                         return_to = esc(return_to),
@@ -1277,7 +1294,7 @@ pub fn shared_photo_album(album: &photos::albums::Album, photos: &[photos::Photo
             "<main class=\"container py-4\">{}<div class=\"photo-grid\">{}</div>\
              <p class=\"small\">Expires {}</p>{}</main>",
             page_title(&album.title),
-            photo_tiles(photos, &prefix, None),
+            photo_tiles(photos, &prefix, None, false),
             album_expiry_date(album),
             photo_viewer()
         ),
@@ -1921,7 +1938,7 @@ mod tests {
         assert!(html.contains("&lt;x&gt;.jpg"));
         assert!(html.contains("src=\"/photos/i/7/thumb\""));
         assert!(html.contains("href=\"/photos/i/7/preview\""));
-        assert!(html.contains("data-action=\"/photos/i/7/tags\""));
+        assert!(html.contains("data-action=\"/admin/photos/i/7/tags\""));
         assert!(html.contains("data-tags=\"mike\""));
         assert!(html.contains("aria-label=\"Edit tags for &lt;x&gt;.jpg\""));
         assert!(html.contains("name=\"known_tag\" value=\"mike\""));
@@ -1932,6 +1949,36 @@ mod tests {
         assert!(html.contains("data-share-photo=\"7\""));
         assert!(html.contains("name=\"days\" type=\"number\" min=\"1\" max=\"180\" value=\"30\""));
         assert!(html.contains("Showing 1-1 of 3"));
+    }
+
+    #[test]
+    fn admin_only_picker_is_admin_managed_and_photos_cannot_be_selected_for_sharing() {
+        let mut view = photos::TagView {
+            tags: vec![],
+            subtags: vec![],
+            known_tags: vec!["family".into()],
+            photos: vec![photos::Photo {
+                id: 7,
+                path: "one.jpg".into(),
+                tags: vec![],
+            }],
+            total: 1,
+            page: 1,
+        };
+        let member = photo_tag_view(&user(2, "sam", false), Features::default(), &view);
+        assert!(!member.contains("value=\"admin-only\""));
+        assert!(member.contains("data-action=\"/photos/i/7/tags\""));
+        let admin = photo_tag_view(&user(1, "mike", true), Features::default(), &view);
+        assert!(admin.contains("value=\"admin-only\""));
+        assert!(admin.contains("data-action=\"/admin/photos/i/7/tags\""));
+        assert!(admin.contains("data-share-photo=\"7\""));
+        view.photos[0].tags.push(photos::ADMIN_ONLY_TAG.into());
+        view.known_tags.push(photos::ADMIN_ONLY_TAG.into());
+        let admin = photo_tag_view(&user(1, "mike", true), Features::default(), &view);
+        assert_eq!(admin.matches("value=\"admin-only\"").count(), 1);
+        assert!(admin.contains("data-action=\"/admin/photos/i/7/tags\""));
+        assert!(admin.contains("/photos/i/7/preview"));
+        assert!(!admin.contains("data-share-photo=\"7\""));
     }
 
     #[test]

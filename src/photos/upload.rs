@@ -1,4 +1,4 @@
-use super::add_date_tags;
+use super::{add_date_tags, Visibility};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -8,6 +8,7 @@ use std::path::Path;
 #[derive(Debug)]
 pub enum UploadError {
     Invalid(&'static str),
+    NotFound,
     Failed(String),
 }
 
@@ -155,6 +156,7 @@ pub fn upload(
     filename: &str,
     bytes: &[u8],
     now: i64,
+    visibility: Visibility,
 ) -> Result<Uploaded, UploadError> {
     let ext = photo_format(bytes)?;
     validate_image(bytes, ext)?;
@@ -186,6 +188,7 @@ pub fn upload(
             ))
         })?;
         let mut found = None;
+        let mut restricted_match = false;
         for row in rows {
             let (id, date, path) = row?;
             let path = match root.join(path).canonicalize() {
@@ -197,9 +200,15 @@ pub fn upload(
                 && path.is_file()
                 && super::hash(&path).map_err(UploadError::Failed)? == hash
             {
-                found = Some((id, date));
-                break;
+                if super::visible(&tx, id, visibility)? {
+                    found = Some((id, date));
+                    break;
+                }
+                restricted_match = true;
             }
+        }
+        if found.is_none() && restricted_match {
+            return Err(UploadError::NotFound);
         }
         found
     };
@@ -293,6 +302,7 @@ pub fn change_date(
     root: &Path,
     id: i64,
     month: &str,
+    visibility: Visibility,
 ) -> Result<bool, UploadError> {
     if !month_valid(month) {
         return Err(UploadError::Invalid("Choose a valid year and month."));
@@ -303,7 +313,11 @@ pub fn change_date(
     let tx = super::photo_transaction(conn, &root).map_err(UploadError::Failed)?;
     let photo = tx
         .query_row(
-            "SELECT taken_on, path FROM photos WHERE id = ?1 AND missing_at IS NULL",
+            &format!(
+                "SELECT taken_on, path FROM photos p \
+                 WHERE p.id = ?1 AND p.missing_at IS NULL AND {}",
+                visibility.sql()
+            ),
             [id],
             |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)),
         )
@@ -385,7 +399,15 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let mut conn = db::open_memory();
         let bytes = jpeg(true);
-        let first = upload(&conn, &root, "../family.jpg", &bytes, 1_793_831_400).unwrap();
+        let first = upload(
+            &conn,
+            &root,
+            "../family.jpg",
+            &bytes,
+            1_793_831_400,
+            Visibility::Restricted,
+        )
+        .unwrap();
         assert_eq!(first.date.as_deref(), Some("2018-03-15"));
         assert_eq!(first.date_source, "metadata");
         assert!(!first.duplicate);
@@ -396,7 +418,15 @@ mod tests {
             .unwrap();
         assert!(path.starts_with("2018/20180300/"));
         assert!(root.join(&path).is_file());
-        let duplicate = upload(&conn, &root, "another.jpg", &bytes, 1_793_831_400).unwrap();
+        let duplicate = upload(
+            &conn,
+            &root,
+            "another.jpg",
+            &bytes,
+            1_793_831_400,
+            Visibility::Restricted,
+        )
+        .unwrap();
         assert_eq!(duplicate.id, first.id);
         assert!(duplicate.duplicate);
         assert_eq!(photos::unsynced(&conn).unwrap().len(), 1);
@@ -407,7 +437,7 @@ mod tests {
             [first.id],
         )
         .unwrap();
-        assert!(change_date(&conn, &root, first.id, "2020-05").unwrap());
+        assert!(change_date(&conn, &root, first.id, "2020-05", Visibility::Restricted).unwrap());
         let corrected: String = conn
             .query_row("SELECT path FROM photos WHERE id = ?1", [first.id], |r| {
                 r.get(0)
@@ -417,10 +447,10 @@ mod tests {
         assert!(root.join(&corrected).is_file());
         assert!(!root.join(&path).exists());
         assert!(matches!(
-            change_date(&conn, &root, first.id, "2020-13"),
+            change_date(&conn, &root, first.id, "2020-13", Visibility::Restricted),
             Err(UploadError::Invalid(_))
         ));
-        assert!(!change_date(&conn, &root, 999, "2020-05").unwrap());
+        assert!(!change_date(&conn, &root, 999, "2020-05", Visibility::Restricted).unwrap());
         photos::scan(&mut conn, &root, 100).unwrap();
         let date: String = conn
             .query_row(
@@ -431,19 +461,26 @@ mod tests {
             .unwrap();
         assert_eq!(date, "2020-05");
         assert_eq!(
-            photos::tag_view(&conn, &["2020".into(), "2020-05".into()], 1)
+            photos::tag_view(
+                &conn,
+                &["2020".into(), "2020-05".into()],
+                1,
+                Visibility::Restricted
+            )
+            .unwrap()
+            .total,
+            1
+        );
+        assert_eq!(
+            photos::tag_view(&conn, &["family".into()], 1, Visibility::Restricted)
                 .unwrap()
                 .total,
             1
         );
         assert_eq!(
-            photos::tag_view(&conn, &["family".into()], 1)
+            photos::tag_view(&conn, &["2018".into()], 1, Visibility::Restricted)
                 .unwrap()
                 .total,
-            1
-        );
-        assert_eq!(
-            photos::tag_view(&conn, &["2018".into()], 1).unwrap().total,
             0
         );
         std::fs::remove_dir_all(root).unwrap();
@@ -454,7 +491,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("photo-upload-{}", rand::random::<u64>()));
         std::fs::create_dir(&root).unwrap();
         let mut conn = db::open_memory();
-        let uploaded = upload(&conn, &root, "phone.jpg", &jpeg(false), 1_793_831_400).unwrap();
+        let uploaded = upload(
+            &conn,
+            &root,
+            "phone.jpg",
+            &jpeg(false),
+            1_793_831_400,
+            Visibility::Restricted,
+        )
+        .unwrap();
         let path: String = conn
             .query_row(
                 "SELECT path FROM photos WHERE id = ?1",
@@ -526,17 +571,168 @@ mod tests {
             .parse::<jiff::Timestamp>()
             .unwrap()
             .as_second();
-        let uploaded = upload(&conn, &root, "x.jpg", &jpeg(false), now).unwrap();
+        let uploaded = upload(
+            &conn,
+            &root,
+            "x.jpg",
+            &jpeg(false),
+            now,
+            Visibility::Restricted,
+        )
+        .unwrap();
         assert_eq!(uploaded.date.as_deref(), Some("2026-10"));
         assert_eq!(uploaded.date_source, "current month");
         assert!(matches!(
-            upload(&conn, &root, "fake.jpg", b"not a photo", now),
+            upload(
+                &conn,
+                &root,
+                "fake.jpg",
+                b"not a photo",
+                now,
+                Visibility::Restricted
+            ),
             Err(UploadError::Invalid(_))
         ));
         assert!(matches!(
-            upload(&conn, &root, "broken.jpg", &[0xff, 0xd8, 0xff], now),
+            upload(
+                &conn,
+                &root,
+                "broken.jpg",
+                &[0xff, 0xd8, 0xff],
+                now,
+                Visibility::Restricted
+            ),
             Err(UploadError::Invalid(_))
         ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn admin_only_blocks_duplicate_metadata_and_date_changes_and_survives_scan() {
+        let root =
+            std::env::temp_dir().join(format!("photo-private-upload-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let mut conn = db::open_memory();
+        let bytes = jpeg(true);
+        let first = upload(&conn, &root, "one.jpg", &bytes, 100, Visibility::Admin).unwrap();
+        photos::set_tags(
+            &conn,
+            first.id,
+            &["family".into(), photos::ADMIN_ONLY_TAG.into()],
+            Visibility::Admin,
+        )
+        .unwrap();
+        assert!(matches!(
+            upload(&conn, &root, "two.jpg", &bytes, 100, Visibility::Restricted),
+            Err(UploadError::NotFound)
+        ));
+        assert_eq!(photos::unsynced(&conn).unwrap().len(), 1);
+        let original_path: String = conn
+            .query_row("SELECT path FROM photos WHERE id = ?1", [first.id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(!change_date(&conn, &root, first.id, "2020-05", Visibility::Restricted).unwrap());
+        assert!(root.join(&original_path).is_file());
+        assert!(!root.join("2020/20200500").exists());
+        let duplicate = upload(&conn, &root, "two.jpg", &bytes, 100, Visibility::Admin).unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.id, first.id);
+        assert_eq!(duplicate.date.as_deref(), Some("2018-03-15"));
+        assert!(change_date(&conn, &root, first.id, "2020-05", Visibility::Admin).unwrap());
+        photos::scan(&mut conn, &root, 200).unwrap();
+        let admin = photos::tag_view(&conn, &[], 1, Visibility::Admin).unwrap();
+        assert_eq!(admin.photos.len(), 1);
+        assert_eq!(admin.photos[0].id, first.id);
+        assert!(admin.photos[0].path.starts_with("2020/20200500/"));
+        assert!(!root.join(&original_path).exists());
+        assert_eq!(admin.photos[0].tags, [photos::ADMIN_ONLY_TAG, "family"]);
+        assert_eq!(
+            photos::tag_view(&conn, &["2020-05".into()], 1, Visibility::Admin)
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            photos::summary(&conn, Visibility::Restricted)
+                .unwrap()
+                .total,
+            0
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_upload_prefers_visible_copy_over_admin_only_matches() {
+        let root =
+            std::env::temp_dir().join(format!("photo-mixed-duplicates-{}", rand::random::<u64>()));
+        std::fs::create_dir(&root).unwrap();
+        let mut conn = db::open_memory();
+        let bytes = jpeg(true);
+        let hidden = upload(&conn, &root, "hidden.jpg", &bytes, 100, Visibility::Admin).unwrap();
+        photos::set_tags(
+            &conn,
+            hidden.id,
+            &[photos::ADMIN_ONLY_TAG.into()],
+            Visibility::Admin,
+        )
+        .unwrap();
+        std::fs::write(root.join("visible.jpg"), &bytes).unwrap();
+        photos::scan(&mut conn, &root, 100).unwrap();
+        let visible_id: i64 = conn
+            .query_row(
+                "SELECT id FROM photos WHERE path = 'visible.jpg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(visible_id > hidden.id);
+        let duplicate = upload(
+            &conn,
+            &root,
+            "another.jpg",
+            &bytes,
+            100,
+            Visibility::Restricted,
+        )
+        .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.id, visible_id);
+        assert_eq!(duplicate.date, None);
+        assert_eq!(duplicate.date_source, "existing");
+
+        std::fs::write(root.join("visible.jpg"), b"changed").unwrap();
+        assert!(matches!(
+            upload(
+                &conn,
+                &root,
+                "another.jpg",
+                &bytes,
+                100,
+                Visibility::Restricted
+            ),
+            Err(UploadError::NotFound)
+        ));
+        std::fs::write(root.join("visible.jpg"), &bytes).unwrap();
+        photos::set_tags(
+            &conn,
+            visible_id,
+            &[photos::ADMIN_ONLY_TAG.into()],
+            Visibility::Admin,
+        )
+        .unwrap();
+        assert!(matches!(
+            upload(
+                &conn,
+                &root,
+                "another.jpg",
+                &bytes,
+                100,
+                Visibility::Restricted
+            ),
+            Err(UploadError::NotFound)
+        ));
+        assert_eq!(photos::unsynced(&conn).unwrap().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -546,14 +742,30 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let conn = db::open_memory();
         let bytes = jpeg(false);
-        let first = upload(&conn, &root, "photo.jpg", &bytes, 1_793_831_400).unwrap();
+        let first = upload(
+            &conn,
+            &root,
+            "photo.jpg",
+            &bytes,
+            1_793_831_400,
+            Visibility::Restricted,
+        )
+        .unwrap();
         let path: String = conn
             .query_row("SELECT path FROM photos WHERE id = ?1", [first.id], |r| {
                 r.get(0)
             })
             .unwrap();
         std::fs::write(root.join(path), b"changed").unwrap();
-        let second = upload(&conn, &root, "photo.jpg", &bytes, 1_793_831_400).unwrap();
+        let second = upload(
+            &conn,
+            &root,
+            "photo.jpg",
+            &bytes,
+            1_793_831_400,
+            Visibility::Restricted,
+        )
+        .unwrap();
         assert!(!second.duplicate);
         assert_ne!(first.id, second.id);
         std::fs::remove_dir_all(root).unwrap();

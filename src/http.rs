@@ -220,6 +220,12 @@ impl Req {
         }
     }
 
+    #[cfg(test)]
+    pub fn with_cookie(mut self, cookie: &str) -> Self {
+        self.cookies = cookie.into();
+        self
+    }
+
     pub fn cookie(&self, name: &str) -> Option<&str> {
         self.cookies.split(';').find_map(|pair| {
             let (k, v) = pair.trim().split_once('=')?;

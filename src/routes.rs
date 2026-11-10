@@ -1,6 +1,7 @@
 use crate::auth::{self, Feature, User, SESSION_TTL};
 use crate::config::Config;
 use crate::http::{multipart_upload_file, session_cookie, urlencode, Req, Resp, MAX_PHOTO_SIZE};
+use crate::photos::Visibility;
 use crate::{log, mail, pages, photos, pickle, recipes, sms, trips};
 use rusqlite::{Connection, OptionalExtension};
 
@@ -64,6 +65,7 @@ fn authed(
     token: &str,
     now: i64,
 ) -> rusqlite::Result<Resp> {
+    let visibility = Visibility::for_user(user);
     if let Some(status) = req.body_error {
         return Ok(if req.path == "/photos/upload" {
             Resp::json(
@@ -84,13 +86,16 @@ fn authed(
         }
         (_, ["admin", ..]) if !user.is_admin => Ok(Resp::html(404, pages::not_found())),
         ("GET", ["admin", "users"]) => admin_page(conn, cfg, user),
+        ("POST", ["admin", "photos", "i", id, "tags"]) if cfg.photos.is_some() => {
+            photo_tags(conn, cfg, req, user, id, Visibility::Admin)
+        }
         ("GET", ["sms"]) if user.can(Feature::Sms) => Ok(sms_page(cfg, user)),
         ("GET", ["pickle"]) if user.can(Feature::Pickle) => {
             pickle_page(conn, cfg, user, now, None, 200)
         }
         ("GET", ["photos"]) if user.can(Feature::Photos) => {
             let summary = if cfg.photos.is_some() {
-                Some(photos::summary(conn)?)
+                Some(photos::summary(conn, visibility)?)
             } else {
                 None
             };
@@ -129,10 +134,12 @@ fn authed(
                 .get("filename")
                 .map(String::as_str)
                 .unwrap_or("photo");
-            Ok(match photos::upload(conn, root, filename, image, now) {
-                Ok(uploaded) => Resp::json(200, &uploaded),
-                Err(error) => photo_upload_error(error),
-            })
+            Ok(
+                match photos::upload(conn, root, filename, image, now, visibility) {
+                    Ok(uploaded) => Resp::json(200, &uploaded),
+                    Err(error) => photo_upload_error(error),
+                },
+            )
         }
         ("POST", ["photos", "i", id, "date"])
             if user.can(Feature::Photos) && cfg.photos.is_some() =>
@@ -151,11 +158,13 @@ fn authed(
             };
             let month = req.form.get("month").map(String::as_str).unwrap_or("");
             let root = std::path::Path::new(&cfg.photos.as_ref().expect("checked above").dir);
-            Ok(match photos::change_date(conn, root, id, month) {
-                Ok(true) => Resp::json(200, &serde_json::json!({"date": month})),
-                Ok(false) => Resp::json(404, &serde_json::json!({"error": "Photo not found."})),
-                Err(error) => photo_upload_error(error),
-            })
+            Ok(
+                match photos::change_date(conn, root, id, month, visibility) {
+                    Ok(true) => Resp::json(200, &serde_json::json!({"date": month})),
+                    Ok(false) => Resp::json(404, &serde_json::json!({"error": "Photo not found."})),
+                    Err(error) => photo_upload_error(error),
+                },
+            )
         }
         ("GET", ["photos", "all"]) | ("GET", ["photos", "t", ..])
             if user.can(Feature::Photos) && cfg.photos.is_some() =>
@@ -176,6 +185,11 @@ fn authed(
                     None => return Ok(Resp::html(404, pages::not_found())),
                 }
             }
+            if visibility == Visibility::Restricted
+                && names.iter().any(|name| name == photos::ADMIN_ONLY_TAG)
+            {
+                return Ok(Resp::html(404, pages::not_found()));
+            }
             let page = match req.query.get("page") {
                 None => 1,
                 Some(raw) => match raw.parse::<i64>() {
@@ -183,7 +197,7 @@ fn authed(
                     _ => return Ok(Resp::html(400, pages::not_found())),
                 },
             };
-            let view = photos::tag_view(conn, &names, page)?;
+            let view = photos::tag_view(conn, &names, page, visibility)?;
             Ok(Resp::html(
                 200,
                 pages::photo_tag_view(user, features(cfg), &view),
@@ -192,42 +206,12 @@ fn authed(
         ("GET", ["photos", "i", id, kind @ ("thumb" | "preview" | "original")])
             if user.can(Feature::Photos) && cfg.photos.is_some() =>
         {
-            photo_image(conn, cfg, id, kind)
+            photo_image(conn, cfg, id, kind, visibility)
         }
         ("POST", ["photos", "i", id, "tags"])
             if user.can(Feature::Photos) && cfg.photos.is_some() =>
         {
-            let Ok(id) = id.parse::<i64>() else {
-                return Ok(Resp::html(404, pages::not_found()));
-            };
-            let raw = req.form.get("tags").map(String::as_str).unwrap_or("");
-            let names = match photos::parse_tags(raw) {
-                Ok(names) => names,
-                Err(message) => {
-                    return Ok(Resp::html(
-                        400,
-                        pages::photo_tags_error(user, features(cfg), &message),
-                    ))
-                }
-            };
-            if photos::set_tags(conn, id, &names)? {
-                let return_to = req
-                    .form
-                    .get("return_to")
-                    .filter(|path| {
-                        (path.starts_with("/photos/t/")
-                            || *path == "/photos/all"
-                            || path.starts_with("/photos/all?"))
-                            && path
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b"/%?=&.-_~".contains(&b))
-                    })
-                    .map(String::as_str)
-                    .unwrap_or("/photos");
-                Ok(Resp::redirect(return_to))
-            } else {
-                Ok(Resp::html(404, pages::not_found()))
-            }
+            photo_tags(conn, cfg, req, user, id, Visibility::Restricted)
         }
         (_, ["recipes", rest @ ..]) if user.can(Feature::Recipes) => {
             recipes_route(conn, cfg, req, user, rest, now)
@@ -284,6 +268,9 @@ fn authed(
 
 fn photo_upload_error(error: photos::UploadError) -> Resp {
     match error {
+        photos::UploadError::NotFound => {
+            Resp::json(404, &serde_json::json!({"error": "Photo not found."}))
+        }
         photos::UploadError::Invalid(message) => {
             Resp::json(400, &serde_json::json!({"error": message}))
         }
@@ -293,6 +280,46 @@ fn photo_upload_error(error: photos::UploadError) -> Resp {
                 500,
                 &serde_json::json!({"error": "Could not save the photo. Please try again."}),
             )
+        }
+    }
+}
+
+fn photo_tags(
+    conn: &Connection,
+    cfg: &Config,
+    req: &Req,
+    user: &User,
+    id: &str,
+    visibility: Visibility,
+) -> rusqlite::Result<Resp> {
+    let Ok(id) = id.parse::<i64>() else {
+        return Ok(Resp::html(404, pages::not_found()));
+    };
+    let error =
+        |message: &str| Resp::html(400, pages::photo_tags_error(user, features(cfg), message));
+    let raw = req.form.get("tags").map(String::as_str).unwrap_or("");
+    let names = match photos::parse_tags(raw) {
+        Ok(names) => names,
+        Err(message) => return Ok(error(&message)),
+    };
+    match photos::set_tags(conn, id, &names, visibility)? {
+        photos::TagUpdate::ReservedTag => Ok(error("Only admins can change the admin-only tag.")),
+        photos::TagUpdate::NotFound => Ok(Resp::html(404, pages::not_found())),
+        photos::TagUpdate::Saved => {
+            let return_to = req
+                .form
+                .get("return_to")
+                .filter(|path| {
+                    (path.starts_with("/photos/t/")
+                        || *path == "/photos/all"
+                        || path.starts_with("/photos/all?"))
+                        && path
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"/%?=&.-_~".contains(&b))
+                })
+                .map(String::as_str)
+                .unwrap_or("/photos");
+            Ok(Resp::redirect(return_to))
         }
     }
 }
@@ -373,7 +400,7 @@ fn shared_photos(
             if !photos::albums::contains(conn, album.id, photo_id)? {
                 return not_found();
             }
-            photo_image(conn, cfg, id, kind)?
+            photo_image(conn, cfg, id, kind, Visibility::Restricted)?
         }
         _ => return not_found(),
     };
@@ -382,14 +409,24 @@ fn shared_photos(
         .header("X-Robots-Tag", "noindex, nofollow".into()))
 }
 
-fn photo_image(conn: &Connection, cfg: &Config, id: &str, kind: &str) -> rusqlite::Result<Resp> {
+fn photo_image(
+    conn: &Connection,
+    cfg: &Config,
+    id: &str,
+    kind: &str,
+    visibility: Visibility,
+) -> rusqlite::Result<Resp> {
     let not_found = || Resp::html(404, pages::not_found());
     let Ok(id) = id.parse::<i64>() else {
         return Ok(not_found());
     };
     let photo = conn
         .query_row(
-            "SELECT path, sha256 FROM photos WHERE id = ?1 AND missing_at IS NULL",
+            &format!(
+                "SELECT path, sha256 FROM photos p \
+                 WHERE p.id = ?1 AND p.missing_at IS NULL AND {}",
+                visibility.sql()
+            ),
             [id],
             |r| {
                 Ok((
@@ -929,6 +966,123 @@ mod tests {
     }
 
     #[test]
+    fn admin_only_photo_routes_override_all_feature_grants() {
+        let root =
+            std::env::temp_dir().join(format!("photo-admin-routes-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(root.join("2026/202611")).unwrap();
+        for name in ["hidden.png", "visible.png"] {
+            image::RgbImage::new(40, 20)
+                .save(root.join("2026/202611").join(name))
+                .unwrap();
+        }
+        let mut conn = db::open_memory();
+        photos::scan(&mut conn, &root, 100).unwrap();
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM photos WHERE path LIKE '%hidden.png'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut config = cfg();
+        config.photos = Some(crate::config::Photos {
+            dir: root.to_str().unwrap().into(),
+        });
+        let member = user(Feature::ALL.to_vec());
+        let mut admin = user(vec![]);
+        admin.is_admin = true;
+        let request = |user: &User, req: Req| {
+            let segs: Vec<_> = req.path.split('/').filter(|s| !s.is_empty()).collect();
+            let resp = authed(&conn, &config, &req, &segs, user, "tok", 100).unwrap();
+            let mut out = Vec::new();
+            resp.write_to(&mut out).unwrap();
+            out
+        };
+        let tags_url = format!("/photos/i/{id}/tags");
+        let admin_tags_url = format!("/admin/photos/i/{id}/tags");
+        for user in [&admin, &member] {
+            assert!(
+                request(user, Req::test("POST", &tags_url, "tags=ADMIN-ONLY"))
+                    .starts_with(b"Status: 400")
+            );
+        }
+        assert!(request(
+            &member,
+            Req::test("POST", &admin_tags_url, "tags=admin-only")
+        )
+        .starts_with(b"Status: 404"));
+        let saved = request(
+            &admin,
+            Req::test(
+                "POST",
+                &admin_tags_url,
+                "tags=Family%2C+ADMIN-ONLY&return_to=%2Fphotos%2Fall%3Fpage%3D1",
+            ),
+        );
+        assert!(saved.starts_with(b"Status: 303"));
+        assert!(String::from_utf8_lossy(&saved).contains("Location: /photos/all?page=1"));
+        for user in [&member, &admin] {
+            assert!(
+                request(user, Req::test("POST", &tags_url, "tags=")).starts_with(b"Status: 404")
+            );
+        }
+        for path in ["/photos/all", "/photos/t/2026", "/photos/t/2026/2026-11"] {
+            let restricted = request(&member, Req::test("GET", path, ""));
+            let restricted = String::from_utf8_lossy(&restricted);
+            assert!(!restricted.contains("hidden.png"));
+            assert!(!restricted.contains("value=\"family\""));
+            assert!(restricted.contains("visible.png"));
+            assert!(restricted.contains("1 photos."));
+            let allowed = request(&admin, Req::test("GET", path, ""));
+            assert!(String::from_utf8_lossy(&allowed).contains("hidden.png"));
+        }
+        let landing = request(&member, Req::test("GET", "/photos", ""));
+        let landing = String::from_utf8_lossy(&landing);
+        assert!(landing.contains("1 photos"));
+        assert!(!landing.contains("admin-only"));
+        assert!(!landing.contains("/photos/t/family"));
+        for path in ["/photos/t/admin-only", "/photos/t/2026/ADMIN-ONLY"] {
+            assert!(request(&member, Req::test("GET", path, "")).starts_with(b"Status: 404"));
+            assert!(request(&admin, Req::test("GET", path, "")).starts_with(b"Status: 200"));
+        }
+        for kind in ["thumb", "preview", "original"] {
+            let path = format!("/photos/i/{id}/{kind}");
+            let allowed = request(&admin, Req::test("GET", &path, ""));
+            assert!(allowed.starts_with(b"Status: 200"));
+            assert!(String::from_utf8_lossy(&allowed).contains("Cache-Control: private, no-store"));
+            assert!(request(&member, Req::test("GET", &path, "")).starts_with(b"Status: 404"));
+        }
+        for (user, status) in [(&member, "Status: 404"), (&admin, "Status: 200")] {
+            let mut date = Req::test("POST", &format!("/photos/i/{id}/date"), "month=2020-05");
+            date.requested_with = "1".into();
+            assert!(request(user, date).starts_with(status.as_bytes()));
+        }
+        assert!(
+            request(&admin, Req::test("POST", &admin_tags_url, "tags=family"))
+                .starts_with(b"Status: 303")
+        );
+        assert!(request(
+            &member,
+            Req::test("GET", &format!("/photos/i/{id}/thumb"), "")
+        )
+        .starts_with(b"Status: 200"));
+        assert!(request(&member, Req::test("POST", &tags_url, "tags=alice"))
+            .starts_with(b"Status: 303"));
+        assert_eq!(
+            photos::tag_view(
+                &conn,
+                &["2020-05".into(), "alice".into()],
+                1,
+                Visibility::Restricted
+            )
+            .unwrap()
+            .total,
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn photo_upload_and_date_require_access_and_same_origin_header() {
         let root =
             std::env::temp_dir().join(format!("photo-upload-routes-{}", rand::random::<u64>()));
@@ -975,7 +1129,7 @@ mod tests {
         let valid_upload = req.body.clone();
         req.body = b"not multipart".to_vec();
         assert!(call(&granted, &req).contains("Invalid upload request."));
-        req.body = valid_upload;
+        req.body = valid_upload.clone();
         let mut oversized = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"photo.jpg\"\r\n\r\n"
         )
@@ -989,6 +1143,23 @@ mod tests {
         date.requested_with = "1".into();
         assert!(call(&denied, &date).starts_with("Status: 404"));
         assert!(call(&granted, &date).contains("\"date\":\"2022-03\""));
+        photos::set_tags(
+            &conn,
+            1,
+            &[photos::ADMIN_ONLY_TAG.into()],
+            Visibility::Admin,
+        )
+        .unwrap();
+        req.body = valid_upload;
+        let hidden = call(&granted, &req);
+        assert!(hidden.starts_with("Status: 404"));
+        assert!(hidden.contains("\"error\":\"Photo not found.\""));
+        assert!(!hidden.contains("\"id\":"));
+        assert!(!hidden.contains("\"date\":"));
+        assert!(call(&granted, &date).starts_with("Status: 404"));
+        let mut admin = user(vec![]);
+        admin.is_admin = true;
+        assert!(call(&admin, &req).contains("\"duplicate\":true"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1083,6 +1254,74 @@ mod tests {
             &original[split + 4..],
             std::fs::read(root.join("two.png")).unwrap()
         );
+        let mut admin = user(vec![]);
+        admin.is_admin = true;
+        let tags_url = format!("/admin/photos/i/{one}/tags");
+        assert!(request(&admin, "POST", &tags_url, "tags=admin-only").starts_with("Status: 303"));
+        let html = String::from_utf8(public(&url, 100)).unwrap();
+        assert!(!html.contains("one.png"));
+        assert!(html.contains("two.png"));
+        for kind in ["thumb", "preview", "original"] {
+            assert!(public(&format!("{url}/i/{one}/{kind}"), 100).starts_with(b"Status: 404"));
+            assert!(public(&format!("{url}/i/{two}/{kind}"), 100).starts_with(b"Status: 200"));
+        }
+        auth::add_user(&conn, "admin@example.com", None, true, 0).unwrap();
+        let (_, code) = auth::request_code(&conn, "admin@example.com", 100)
+            .unwrap()
+            .unwrap();
+        let token = auth::verify_code(&conn, "admin@example.com", &code, 100)
+            .unwrap()
+            .unwrap();
+        assert!(
+            auth::session_user(&conn, &token, 100)
+                .unwrap()
+                .unwrap()
+                .0
+                .is_admin
+        );
+        for path in [
+            url.clone(),
+            format!("{url}/i/{one}/thumb"),
+            format!("{url}/i/{one}/preview"),
+            format!("{url}/i/{one}/original"),
+        ] {
+            let req = Req::test("GET", &path, "").with_cookie(&format!("session={token}"));
+            let mut out = Vec::new();
+            handle(&conn, &config, &req, 100)
+                .write_to(&mut out)
+                .unwrap();
+            if path == url {
+                assert!(out.starts_with(b"Status: 200"));
+                assert!(!String::from_utf8_lossy(&out).contains("one.png"));
+            } else {
+                assert!(out.starts_with(b"Status: 404"));
+            }
+        }
+        for user in [&owner, &admin] {
+            let invalid = request(user, "POST", "/photos/albums", &create);
+            assert!(invalid.starts_with("Status: 400"));
+            assert!(invalid.contains("selected photos are no longer available"));
+        }
+        assert_eq!(photos::albums::list(&conn, owner.id, 100).unwrap().len(), 1);
+        let admin_gallery = request(&admin, "GET", "/photos/all", "");
+        assert!(!admin_gallery.contains(&format!("data-share-photo=\"{one}\"")));
+        assert!(admin_gallery.contains(&format!("data-share-photo=\"{two}\"")));
+        photos::set_tags(
+            &conn,
+            two,
+            &[photos::ADMIN_ONLY_TAG.into()],
+            Visibility::Admin,
+        )
+        .unwrap();
+        let html = String::from_utf8(public(&url, 100)).unwrap();
+        assert!(html.starts_with("Status: 200"));
+        assert!(!html.contains("one.png"));
+        assert!(!html.contains("two.png"));
+        assert!(request(&admin, "POST", &tags_url, "tags=").starts_with("Status: 303"));
+        let html = String::from_utf8(public(&url, 100)).unwrap();
+        assert!(html.contains("one.png"));
+        assert!(public(&format!("{url}/i/{one}/original"), 100).starts_with(b"Status: 200"));
+        photos::set_tags(&conn, two, &[], Visibility::Admin).unwrap();
         assert!(public(&url, album.expires_at).starts_with(b"Status: 404"));
         for kind in ["thumb", "preview", "original"] {
             assert!(public(&format!("{url}/i/{one}/{kind}"), album.expires_at)
@@ -1094,7 +1333,7 @@ mod tests {
             .is_empty());
         assert_eq!(photos::albums::prune(&conn, album.expires_at).unwrap(), 1);
         assert!(root.join("one.png").exists());
-        assert_eq!(photos::summary(&conn).unwrap().total, 3);
+        assert_eq!(photos::summary(&conn, Visibility::Admin).unwrap().total, 3);
 
         let form = format!("days=1&photo_{one}=1");
         assert!(request(&owner, "POST", "/photos/albums", &form).starts_with("Status: 303"));
