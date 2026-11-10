@@ -9,6 +9,7 @@ use std::time::UNIX_EPOCH;
 
 pub mod albums;
 mod images;
+mod import_tags;
 mod upload;
 pub use images::{image_file, ImageKind};
 pub use upload::{change_date, upload, UploadError};
@@ -566,13 +567,14 @@ pub fn run(args: &[String]) {
         Some("mark-synced") => mark_synced_cmd(),
         Some("moved") => moved_cmd(),
         Some("ack-moves") => ack_moves_cmd(),
+        Some("import-tags") => import_tags::run(&args[1..]),
         Some("prune-albums") => {
             let (_, conn) = open_db();
             let n = albums::prune(&conn, cli::now()).unwrap_or_else(|e| cli::fail(e));
             println!("removed {n} expired albums");
         }
         _ => cli::fail(
-            "usage: willcrock photos scan|migrate-uploads|unsynced|mark-synced|moved|ack-moves|prune-albums",
+            "usage: willcrock photos scan|migrate-uploads|unsynced|mark-synced|moved|ack-moves|prune-albums|import-tags [--dry-run|--apply]",
         ),
     }
 }

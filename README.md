@@ -44,3 +44,34 @@ Interrupted file moves resume automatically before the next scan, migration, upl
 Admins can apply or remove the special `admin-only` tag in the photo tag picker. Tagged photos are hidden from every non-admin, regardless of feature access, including gallery counts, tag suggestions, previews, and original downloads. Only admins can edit these photos. The tag is preserved by date changes and scans; scan/sync backups still include the complete library.
 
 Public share links never show `admin-only` photos, even to signed-in admins. Adding the tag hides a photo from existing share links; removing it restores the photo to those unexpired albums. Tagged photos cannot be selected for new shared albums. This does not revoke files already downloaded or restrict separate untagged copies.
+
+### Import reviewed photo tags
+
+`willcrock photos import-tags` reads a reviewed JSON list from stdin and previews additions without writing anything. Use `--apply` to add the tag. Existing tags, dates, visibility, and original files are preserved; already-tagged photos are reported unchanged. Repeating an import never duplicates photo/tag pairs.
+
+The JSON contains one ordinary tag label and an explicit list of accepted photos:
+
+```json
+{
+  "label": "hockey",
+  "photos": [
+    {
+      "relative_path": "2012/20120200/HockeyChamps.jpg",
+      "sha256": "<64-character SHA-256 of the original file>"
+    }
+  ]
+}
+```
+
+Additional review metadata such as `id`, `root`, and `tagging_rule` is ignored. Paths are relative to the server's configured `[photos].dir`; a local `root` never changes that directory. If a photo includes a `decision` field, it must be `accepted`. Use the accepted-only export, not the complete suggestion manifest.
+
+Every listed path must match a live indexed photo exactly, and both its indexed hash and the original file's actual SHA-256 must match the reviewed hash. Unindexed, missing, renamed, changed, unsafe, or duplicate paths stop the entire import without adding any tags. The importer does not guess by filename, review ID, or matching hashes at other paths. Sync/index the library and update the reviewed list before retrying a stale import.
+
+Run on the server over SSH, first previewing the changes and then explicitly applying the same reviewed file:
+
+```sh
+ssh user@host 'willcrock.com/willcrock.fcgi photos import-tags --dry-run' < accepted.json
+ssh user@host 'willcrock.com/willcrock.fcgi photos import-tags --apply' < accepted.json
+```
+
+The output lists each addition or unchanged photo followed by totals. After applying `hockey`, the existing gallery shows the tag at `/photos/t/hockey`. This is a trusted server CLI operation, not a new web endpoint; no schema migration or external recognition service is needed.
