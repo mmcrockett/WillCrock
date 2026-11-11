@@ -23,9 +23,9 @@ dir = "/home/your-user/data/willcrock.com/cards"
 
 Create that directory before using Cards, restricting access to the server user (for example, `mkdir -m 700 /home/your-user/data/willcrock.com/cards` after creating its parent directories). Cards works without Photos configured; absent Cards configuration shows a setup message. Overlapping Cards and Photos directories are rejected.
 
-Upload one JPEG, PNG, GIF, or WebP image per card, up to 25 MB, with a required name. Names can be edited and need not be unique. Click a thumbnail to view the uncropped image and open its original at full resolution. HEIC and PDF files are not supported. There is no delete action, public sharing, or syncing.
+Upload the front of a card with a required name, then click its thumbnail and use **Upload back** to add an optional back image. Each card has one front and at most one back, shown together on its page (stacked on smaller screens), with a full-resolution link for each. Existing cards keep their image as the front, and the Cards list still shows just one front thumbnail per card. Both sides accept JPEG, PNG, GIF, or WebP, up to 25 MB per image; HEIC and PDF files are not supported. Names can be edited and need not be unique. Deleting a card removes both originals after confirmation. Individual images cannot be replaced or removed, and there is no public sharing or syncing.
 
-Use the Size slider below a card image to shrink it to 25%-100% of its normal display size for scanning; each card's size is remembered in that browser.
+Use the Size slider below either image to shrink it to 25%-100% of its normal display size for scanning; each side's size is remembered independently in that browser.
 
 Back up both the database (names and image records) and the Cards originals. The `.gallery-v1/` thumbnail cache inside the Cards directory is disposable.
 

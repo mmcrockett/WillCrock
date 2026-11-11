@@ -281,6 +281,16 @@ body {
   border-radius: inherit;
 }
 
+.card-sides {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: 1.5rem;
+}
+
+.card-side {
+  min-width: 0;
+}
+
 .card-picture {
   display: block;
   max-width: 100%;

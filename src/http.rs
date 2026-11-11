@@ -6,7 +6,20 @@ pub const MAX_PHOTO_SIZE: usize = 25 * 1024 * 1024;
 const MAX_PHOTO_BODY: u64 = MAX_PHOTO_SIZE as u64 + 64 * 1024;
 
 fn is_image_upload(method: &str, path: &str) -> bool {
-    method == "POST" && matches!(path, "/photos/upload" | "/cards/upload")
+    (method == "POST" && path == "/photos/upload") || is_card_upload(method, path)
+}
+
+pub fn is_card_upload(method: &str, path: &str) -> bool {
+    method == "POST"
+        && (path == "/cards/upload"
+            || path
+                .strip_prefix("/cards/")
+                .and_then(|path| path.strip_suffix("/back/upload"))
+                .is_some_and(|id| {
+                    !id.is_empty()
+                        && id.bytes().all(|b| b.is_ascii_digit())
+                        && id.parse::<i64>().is_ok_and(|id| id > 0)
+                }))
 }
 
 fn boundary_byte(byte: u8) -> bool {
@@ -392,7 +405,7 @@ mod tests {
 
     #[test]
     fn only_exact_image_upload_routes_get_the_large_body_allowance() {
-        for path in ["/photos/upload", "/cards/upload"] {
+        for path in ["/photos/upload", "/cards/upload", "/cards/1/back/upload"] {
             assert!(is_image_upload("POST", path));
             assert!(!is_image_upload("GET", path));
         }
@@ -400,6 +413,15 @@ mod tests {
             "/cards",
             "/cards/1/name",
             "/cards/upload/extra",
+            "/cards/1/back/upload/extra",
+            "/cards/1/back/upload/",
+            "/cards/no/back/upload",
+            "/cards//back/upload",
+            "/cards/1//back/upload",
+            "/cards/0/back/upload",
+            "/cards/-1/back/upload",
+            "/cards/9223372036854775808/back/upload",
+            "/cards/1/back/original",
             "/other/upload",
         ] {
             assert!(!is_image_upload("POST", path));

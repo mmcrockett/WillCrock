@@ -1,5 +1,5 @@
 use crate::auth::{Feature, User};
-use crate::cards::Card;
+use crate::cards::{Card, CardImage};
 use crate::config::Quackr;
 use crate::photos;
 use crate::pickle::dashboard::{self, Dashboard};
@@ -338,7 +338,7 @@ pub fn cards(user: &User, features: Features, cards: Option<&[Card]>) -> String 
                 format!("<div class=\"tile-grid cards-grid\">{tiles}</div>")
             };
             format!(
-                "<form id=\"card-upload\" class=\"card card-body mb-4\">\
+                "<form id=\"card-upload\" class=\"card card-body mb-4\" data-card-upload data-upload-url=\"/cards/upload\">\
                  <h2 class=\"h5\">Upload Card</h2>\
                  <div class=\"mb-3\"><label class=\"form-label\" for=\"card-name\">Name</label>\
                  <input class=\"form-control\" id=\"card-name\" name=\"name\" required></div>\
@@ -365,12 +365,30 @@ pub fn card(
     user: &User,
     features: Features,
     card: &Card,
+    back: Option<&CardImage>,
     name: &str,
     error: Option<&str>,
 ) -> String {
     let error = error
         .map(|message| format!("<div class=\"alert alert-danger\">{}</div>", esc(message)))
         .unwrap_or_default();
+    let front = card_image(card, false);
+    let back = if back.is_some() {
+        card_image(card, true)
+    } else {
+        format!(
+            "<section class=\"card-side\"><form id=\"card-back-upload\" class=\"card card-body mb-4\" \
+             data-card-upload data-upload-url=\"/cards/{id}/back/upload\">\
+             <h2 class=\"h5\">Upload back</h2>\
+             <label class=\"form-label\" for=\"card-back-file\">Back image</label>\
+             <input class=\"form-control mb-3\" id=\"card-back-file\" type=\"file\" \
+             accept=\"image/jpeg,image/png,image/gif,image/webp\" required>\
+             <div><button class=\"btn btn-primary\">Upload back</button></div>\
+             <p role=\"status\" aria-live=\"polite\" class=\"mt-2 mb-0\"></p>\
+             <noscript>Enable JavaScript to upload the back.</noscript></form></section>",
+            id = card.id,
+        )
+    };
     app_page(
         &card.name,
         "cards",
@@ -378,29 +396,43 @@ pub fn card(
         features,
         &format!(
             "{}<p><a href=\"/cards\">Back to Cards</a></p>\
-             <p><a href=\"/cards/{id}/original\">View full-size image</a></p>\
-             <div class=\"mb-4\"><div class=\"card-display\" data-card-id=\"{id}\">\
-             <img id=\"card-picture\" class=\"card-picture\" src=\"/cards/{id}/original\" alt=\"{alt}\">\
-             </div></div>\
-             <div id=\"card-size-controls\" class=\"mb-4\" hidden>\
-             <label class=\"form-label\" for=\"card-size\">Size: <output id=\"card-size-value\" for=\"card-size\">100%</output></label>\
-             <input class=\"form-range\" id=\"card-size\" type=\"range\" min=\"25\" max=\"100\" step=\"5\" \
-             value=\"100\" aria-controls=\"card-picture\">\
-             <p id=\"card-size-status\" class=\"small text-body-secondary mb-0\" role=\"status\"></p></div>\
+             <div class=\"card-sides\">{front}{back}</div>\
              {error}<form method=\"post\" action=\"/cards/{id}/name\" class=\"card card-body\">\
              <label class=\"form-label\" for=\"card-name\">Name</label>\
              <input class=\"form-control mb-3\" id=\"card-name\" name=\"name\" value=\"{name}\" required>\
              <div><button class=\"btn btn-primary\">Save name</button></div></form>\
              <form method=\"post\" action=\"/cards/{id}/delete\" class=\"mt-3\" \
-             onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"Delete this card and its image? This cannot be undone.\">\
+             onsubmit=\"return confirm(this.dataset.msg)\" data-msg=\"Delete this card and its images? This cannot be undone.\">\
              <button class=\"btn btn-outline-danger\">Delete card</button></form>\
              <script src=\"{script}\" defer></script>",
             page_title(&card.name),
             id = card.id,
-            alt = esc(&card.name),
             name = esc(name),
             script = asset("/static/cards.js"),
         ),
+    )
+}
+
+fn card_image(card: &Card, back: bool) -> String {
+    let (side, suffix, path) = if back {
+        ("Back", "-back", "back/original")
+    } else {
+        ("Front", "", "original")
+    };
+    format!(
+        "<section class=\"card-side\" data-side=\"{side}\"><h2 class=\"h5\">{side}</h2>\
+         <p><a href=\"/cards/{id}/{path}\">View full-size image</a></p>\
+         <div class=\"mb-4\"><div class=\"card-display\" data-card-id=\"{id}\">\
+         <img id=\"card-picture{suffix}\" class=\"card-picture\" src=\"/cards/{id}/{path}\" alt=\"{name} - {side}\">\
+         </div></div>\
+         <div id=\"card-size-controls{suffix}\" class=\"mb-4\" hidden>\
+         <label class=\"form-label\" for=\"card-size{suffix}\">Size: \
+         <output id=\"card-size-value{suffix}\" for=\"card-size{suffix}\">100%</output></label>\
+         <input class=\"form-range\" id=\"card-size{suffix}\" type=\"range\" min=\"25\" max=\"100\" step=\"5\" \
+         value=\"100\" aria-controls=\"card-picture{suffix}\">\
+         <p id=\"card-size-status{suffix}\" class=\"small text-body-secondary mb-0\" role=\"status\"></p></div></section>",
+        id = card.id,
+        name = esc(&card.name),
     )
 }
 
@@ -1698,11 +1730,35 @@ mod tests {
             mime: "image/png".into(),
             sha256: "a".repeat(64),
         };
-        let detail = card(&member, Features::default(), &item, &item.name, None);
+        let detail = card(&member, Features::default(), &item, None, &item.name, None);
         assert!(detail.contains("src=\"/cards/7/original\""));
         assert!(detail.contains("class=\"card-display\" data-card-id=\"7\""));
         assert!(detail.contains("id=\"card-size-controls\" class=\"mb-4\" hidden"));
         assert!(detail.contains("for=\"card-size\">Size:"));
+        assert!(detail.contains("data-upload-url=\"/cards/7/back/upload\""));
+        assert!(!detail.contains("src=\"/cards/7/back/original\""));
+        let back = CardImage {
+            path: "back.png".into(),
+            mime: "image/png".into(),
+            sha256: "b".repeat(64),
+        };
+        let both = card(
+            &member,
+            Features::default(),
+            &item,
+            Some(&back),
+            "",
+            Some("Card name is required."),
+        );
+        assert!(both.contains("src=\"/cards/7/original\""));
+        assert!(both.contains("src=\"/cards/7/back/original\""));
+        assert!(both.contains("href=\"/cards/7/back/original\""));
+        assert!(both.contains("id=\"card-size-back\""));
+        assert!(both.contains("aria-controls=\"card-picture-back\""));
+        assert!(both.contains("Card name is required."));
+        assert!(both.contains("&lt;Library &amp; &quot;ID&quot;&gt; - Back"));
+        assert!(!both.contains("<Library"));
+        assert!(!both.contains("id=\"card-back-upload\""));
         assert!(detail.contains(
             "id=\"card-size\" type=\"range\" min=\"25\" max=\"100\" step=\"5\" value=\"100\" aria-controls=\"card-picture\""
         ));
