@@ -574,6 +574,19 @@ fn cards_route(
                 }
             })
         }
+        ("POST", [id, "delete"]) => {
+            let Ok(id) = id.parse::<i64>() else {
+                return Ok(Resp::html(404, pages::not_found()));
+            };
+            Ok(match cards::delete(conn, &root, id) {
+                Ok(true) => Resp::redirect("/cards"),
+                Ok(false) => Resp::html(404, pages::not_found()),
+                Err(e) => {
+                    log::error(&format!("delete card {id}: {e}"));
+                    Resp::html(500, pages::error())
+                }
+            })
+        }
         ("GET", [id]) | ("POST", [id, "name"]) | ("GET", [id, "thumb" | "original"]) => {
             let Ok(id) = id.parse::<i64>() else {
                 return Ok(Resp::html(404, pages::not_found()));
@@ -1011,6 +1024,7 @@ mod tests {
             ("POST", "/cards/upload"),
             ("GET", &detail),
             ("POST", &rename),
+            ("POST", &format!("/cards/{id}/delete")),
             ("GET", &original),
             ("GET", &thumb),
         ] {
@@ -1083,6 +1097,7 @@ mod tests {
             ("GET", "/cards/bad"),
             ("GET", "/cards/999"),
             ("POST", "/cards/999/name"),
+            ("POST", "/cards/999/delete"),
             ("GET", "/cards/999/original"),
             ("GET", "/cards/999/thumb"),
         ] {
@@ -1093,6 +1108,18 @@ mod tests {
         }
         assert!(photos::unsynced(&conn).unwrap().is_empty());
         assert!(!missing_photos.exists());
+        let card = cards::get(&conn, id).unwrap().unwrap();
+        let path = root.join(card.path);
+        let deleted = cards_response(
+            &conn,
+            &config,
+            &granted,
+            Req::test("POST", &format!("/cards/{id}/delete"), ""),
+        );
+        assert!(deleted.starts_with(b"Status: 303"));
+        assert!(String::from_utf8_lossy(&deleted).contains("Location: /cards"));
+        assert!(cards::get(&conn, id).unwrap().is_none());
+        assert!(!path.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

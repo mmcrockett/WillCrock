@@ -141,6 +141,68 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> rusqlite::Result<usize>
     )
 }
 
+pub fn delete(conn: &Connection, root: &Path, id: i64) -> Result<bool, String> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let Some(card) = get(&tx, id).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    let mut components = Path::new(&card.path).components();
+    let Some(Component::Normal(filename)) = components.next() else {
+        return Err("invalid card image path".into());
+    };
+    if components.next().is_some() {
+        return Err("invalid card image path".into());
+    }
+
+    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let path = root.join(filename);
+    let file_exists = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => true,
+        Ok(_) => return Err("card image path is not a file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    if tx
+        .execute("DELETE FROM cards WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?
+        != 1
+    {
+        return Ok(false);
+    }
+    let staged = if file_exists {
+        let staged = root.join(format!(".card-delete-{:032x}.tmp", rand::random::<u128>()));
+        match std::fs::symlink_metadata(&staged) {
+            Ok(_) => return Err("temporary card image path already exists".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        std::fs::rename(&path, &staged).map_err(|e| e.to_string())?;
+        Some(staged)
+    } else {
+        None
+    };
+    if let Err(error) = tx.commit() {
+        if let Some(staged) = staged {
+            std::fs::rename(&staged, &path).map_err(|restore_error| {
+                format!(
+                    "database commit failed: {error}; restoring card image failed: {restore_error}"
+                )
+            })?;
+        }
+        return Err(error.to_string());
+    }
+    if let Some(staged) = staged {
+        if let Err(error) = std::fs::remove_file(&staged) {
+            crate::log::error(&format!(
+                "remove staged card image {}: {error}",
+                staged.display()
+            ));
+        }
+    }
+    Ok(true)
+}
+
 pub fn upload(
     conn: &Connection,
     root: &Path,
@@ -312,6 +374,84 @@ pub mod tests {
         assert!(list(&conn).unwrap().is_empty());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_card_record_and_image() {
+        let root = temp_dir();
+        let conn = db::open_memory();
+        let id = upload(&conn, &root, "Card", &image(image::ImageFormat::Png), 100).unwrap();
+        let path = root.join(get(&conn, id).unwrap().unwrap().path);
+
+        assert!(delete(&conn, &root, id).unwrap());
+        assert!(get(&conn, id).unwrap().is_none());
+        assert!(!path.exists());
+        assert!(!delete(&conn, &root, id).unwrap());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_restores_image_when_database_commit_fails() {
+        let root = temp_dir();
+        let db_path = root.join("test.sqlite");
+        let writer = db::open(db_path.to_str().unwrap()).unwrap();
+        let mut writer = writer;
+        db::migrate(&mut writer).unwrap();
+        let id = upload(&writer, &root, "Card", &image(image::ImageFormat::Png), 100).unwrap();
+        let card = get(&writer, id).unwrap().unwrap();
+        let path = root.join(&card.path);
+        let reader = db::open(db_path.to_str().unwrap()).unwrap();
+        let reader_tx =
+            rusqlite::Transaction::new_unchecked(&reader, TransactionBehavior::Deferred).unwrap();
+        reader_tx
+            .query_row("SELECT id FROM cards WHERE id = ?1", [id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+
+        assert!(delete(&writer, &root, id).is_err());
+        assert_eq!(get(&writer, id).unwrap().unwrap().path, card.path);
+        assert!(path.is_file());
+        assert_eq!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".card-delete-"))
+                .count(),
+            0
+        );
+
+        drop(reader_tx);
+        drop(reader);
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_rejects_paths_outside_card_storage() {
+        let root = temp_dir();
+        let outside = temp_dir();
+        let conn = db::open_memory();
+        let id = upload(&conn, &root, "Card", &image(image::ImageFormat::Png), 100).unwrap();
+        let secret = outside.join("outside.png");
+        fs::write(&secret, b"private").unwrap();
+        conn.execute(
+            "UPDATE cards SET path = ?1 WHERE id = ?2",
+            params![secret.to_string_lossy(), id],
+        )
+        .unwrap();
+
+        assert!(delete(&conn, &root, id).is_err());
+        assert!(get(&conn, id).unwrap().is_some());
+        assert_eq!(fs::read(secret).unwrap(), b"private");
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
