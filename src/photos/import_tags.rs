@@ -17,7 +17,12 @@ struct Manifest {
 struct Photo {
     relative_path: String,
     sha256: String,
-    decision: Option<String>,
+    #[serde(default = "accepted_decision")]
+    decision: String,
+}
+
+fn accepted_decision() -> String {
+    "accepted".into()
 }
 
 struct Entry {
@@ -96,7 +101,7 @@ fn import(conn: &Connection, root: &Path, input: impl Read, apply: bool) -> Resu
         if !seen.insert(path.clone()) {
             return Err(format!("duplicate photo path in import: {path}"));
         }
-        if photo.decision.as_deref().is_some_and(|d| d != "accepted") {
+        if photo.decision != "accepted" {
             return Err(format!("photo is not accepted for import: {path}"));
         }
         if photo.sha256.len() != 64 || !photo.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -275,6 +280,21 @@ mod tests {
             assert!(import(&conn, &root, input.as_bytes(), true).is_err());
             assert_no_import(&conn);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn decisions_may_be_omitted_or_accepted_but_not_null() {
+        let (conn, root, mut manifest) = setup("import-tags-null-decision");
+        manifest["photos"][1]["decision"] = Value::Null;
+        for apply in [false, true] {
+            let error = run_import(&conn, &root, &manifest, apply).err().unwrap();
+            assert!(error.contains("invalid tag import JSON"));
+            assert_no_import(&conn);
+        }
+        manifest["photos"][1]["decision"] = json!("accepted");
+        run_import(&conn, &root, &manifest, true).unwrap();
+        assert_eq!(tag_count(&conn, "hockey"), 2);
         fs::remove_dir_all(root).unwrap();
     }
 
