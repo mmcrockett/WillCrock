@@ -201,6 +201,15 @@ CREATE TABLE cards (
   created_at INTEGER NOT NULL
 );
 ",
+    "
+CREATE TABLE card_backs (
+  card_id INTEGER PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
+  path TEXT NOT NULL UNIQUE,
+  mime TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
@@ -243,6 +252,23 @@ pub fn open_memory() -> Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_backs_migration_preserves_existing_fronts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, MIGRATIONS.len() - 1).unwrap();
+        conn.execute(
+            "INSERT INTO cards VALUES (7, 'Library', 'front.png', 'image/png', 'hash', 100)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        assert_eq!(migrate(&mut conn).unwrap(), 0);
+        let card = crate::cards::get(&conn, 7).unwrap().unwrap();
+        assert_eq!(card.name, "Library");
+        assert_eq!(card.path, "front.png");
+        assert!(crate::cards::get_back(&conn, 7).unwrap().is_none());
+    }
 
     #[test]
     fn migrate_is_idempotent() {

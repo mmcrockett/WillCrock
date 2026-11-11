@@ -1,9 +1,7 @@
-(() => {
-  const form = document.querySelector("#card-upload");
-  if (!form) return;
-  const name = document.querySelector("#card-name");
-  const input = document.querySelector("#card-file");
-  const status = document.querySelector("#card-upload-status");
+document.querySelectorAll("[data-card-upload]").forEach((form) => {
+  const name = form.querySelector('[name="name"]');
+  const input = form.querySelector('input[type="file"]');
+  const status = form.querySelector('[role="status"]');
   const button = form.querySelector("button");
 
   form.addEventListener("submit", async (event) => {
@@ -12,14 +10,16 @@
     if (!file) return;
     button.disabled = true;
     input.disabled = true;
-    name.disabled = true;
+    if (name) name.disabled = true;
     status.textContent = "Uploading...";
     try {
-      if (!name.value.trim()) throw new Error("Card name is required.");
+      if (name && !name.value.trim()) throw new Error("Card name is required.");
       if (file.size > 25 * 1024 * 1024) throw new Error("Card image exceeds 25 MB.");
       const body = new FormData();
       body.append("photo", file, file.name);
-      const response = await fetch(`/cards/upload?${new URLSearchParams({ name: name.value })}`, {
+      const url = new URL(form.dataset.uploadUrl, window.location.origin);
+      if (name) url.searchParams.set("name", name.value);
+      const response = await fetch(url, {
         method: "POST",
         headers: { "X-Willcrock-Request": "1" },
         body,
@@ -33,20 +33,19 @@
     } finally {
       button.disabled = false;
       input.disabled = false;
-      name.disabled = false;
+      if (name) name.disabled = false;
     }
   });
-})();
+});
 
-(() => {
-  const display = document.querySelector(".card-display");
-  if (!display) return;
+document.querySelectorAll(".card-side[data-side]").forEach((panel) => {
+  const display = panel.querySelector(".card-display");
   const image = display.querySelector("img");
-  const controls = document.querySelector("#card-size-controls");
-  const slider = document.querySelector("#card-size");
-  const value = document.querySelector("#card-size-value");
-  const status = document.querySelector("#card-size-status");
-  const key = `willcrock:card-size:${display.dataset.cardId}`;
+  const controls = panel.querySelector('[id^="card-size-controls"]');
+  const slider = panel.querySelector('input[type="range"]');
+  const value = panel.querySelector("output");
+  const status = panel.querySelector('[role="status"]');
+  const key = `willcrock:card-size:${display.dataset.cardId}${panel.dataset.side === "Back" ? ":back" : ""}`;
   const storageError = () => {
     status.textContent = "Size can't be remembered in this browser.";
   };
@@ -78,4 +77,4 @@
   });
   if (image.complete) initialize();
   else image.addEventListener("load", initialize, { once: true });
-})();
+});

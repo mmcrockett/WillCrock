@@ -13,8 +13,16 @@ pub struct Card {
     pub sha256: String,
 }
 
+pub struct CardImage {
+    pub path: String,
+    pub mime: String,
+    pub sha256: String,
+}
+
 #[derive(Debug)]
 pub enum UploadError {
+    NotFound,
+    BackExists,
     Invalid(&'static str),
     Failed(String),
 }
@@ -141,28 +149,47 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> rusqlite::Result<usize>
     )
 }
 
+pub fn get_back(conn: &Connection, id: i64) -> rusqlite::Result<Option<CardImage>> {
+    conn.query_row(
+        "SELECT path, mime, sha256 FROM card_backs WHERE card_id = ?1",
+        [id],
+        |row| {
+            Ok(CardImage {
+                path: row.get(0)?,
+                mime: row.get(1)?,
+                sha256: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub fn delete(conn: &Connection, root: &Path, id: i64) -> Result<bool, String> {
     let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     let Some(card) = get(&tx, id).map_err(|e| e.to_string())? else {
         return Ok(false);
     };
-    let mut components = Path::new(&card.path).components();
-    let Some(Component::Normal(filename)) = components.next() else {
-        return Err("invalid card image path".into());
-    };
-    if components.next().is_some() {
-        return Err("invalid card image path".into());
-    }
-
+    let back = get_back(&tx, id).map_err(|e| e.to_string())?;
     let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let path = root.join(filename);
-    let file_exists = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => true,
-        Ok(_) => return Err("card image path is not a file".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.to_string()),
-    };
+    let mut paths = Vec::new();
+    for filename in
+        std::iter::once(card.path.as_str()).chain(back.as_ref().map(|b| b.path.as_str()))
+    {
+        let mut components = Path::new(filename).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err("invalid card image path".into());
+        }
+        let path = root.join(filename);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+                paths.push(path)
+            }
+            Ok(_) => return Err("card image path is not a file".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
     if tx
         .execute("DELETE FROM cards WHERE id = ?1", [id])
         .map_err(|e| e.to_string())?
@@ -170,29 +197,32 @@ pub fn delete(conn: &Connection, root: &Path, id: i64) -> Result<bool, String> {
     {
         return Ok(false);
     }
-    let staged = if file_exists {
-        let staged = root.join(format!(".card-delete-{:032x}.tmp", rand::random::<u128>()));
-        match std::fs::symlink_metadata(&staged) {
-            Ok(_) => return Err("temporary card image path already exists".into()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+    let mut staged_files = Vec::new();
+    let result = (|| {
+        for path in paths {
+            let staged = root.join(format!(".card-delete-{:032x}.tmp", rand::random::<u128>()));
+            match std::fs::symlink_metadata(&staged) {
+                Ok(_) => return Err("temporary card image path already exists".to_string()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            std::fs::rename(&path, &staged).map_err(|e| e.to_string())?;
+            staged_files.push((path, staged));
         }
-        std::fs::rename(&path, &staged).map_err(|e| e.to_string())?;
-        Some(staged)
-    } else {
-        None
-    };
-    if let Err(error) = tx.commit() {
-        if let Some(staged) = staged {
-            std::fs::rename(&staged, &path).map_err(|restore_error| {
-                format!(
-                    "database commit failed: {error}; restoring card image failed: {restore_error}"
-                )
-            })?;
+        tx.commit().map_err(|e| e.to_string())
+    })();
+    if let Err(mut error) = result {
+        for (path, staged) in staged_files.iter().rev() {
+            if let Err(restore_error) = std::fs::rename(staged, path) {
+                error.push_str(&format!(
+                    "; restoring card image {} failed: {restore_error}",
+                    path.display()
+                ));
+            }
         }
-        return Err(error.to_string());
+        return Err(error);
     }
-    if let Some(staged) = staged {
+    for (_, staged) in staged_files {
         if let Err(error) = std::fs::remove_file(&staged) {
             crate::log::error(&format!(
                 "remove staged card image {}: {error}",
@@ -211,6 +241,47 @@ pub fn upload(
     now: i64,
 ) -> Result<i64, UploadError> {
     let name = parse_name(name).map_err(UploadError::Invalid)?;
+    save_image(root, bytes, |image| {
+        let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO cards (name, path, mime, sha256, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![name, image.path, image.mime, image.sha256, now],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    })
+}
+
+pub fn upload_back(
+    conn: &Connection,
+    root: &Path,
+    id: i64,
+    bytes: &[u8],
+    now: i64,
+) -> Result<i64, UploadError> {
+    save_image(root, bytes, |image| {
+        let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        if get(&tx, id)?.is_none() {
+            return Err(UploadError::NotFound);
+        }
+        if get_back(&tx, id)?.is_some() {
+            return Err(UploadError::BackExists);
+        }
+        tx.execute(
+            "INSERT INTO card_backs (card_id, path, mime, sha256, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, image.path, image.mime, image.sha256, now],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    })
+}
+
+fn save_image(
+    root: &Path,
+    bytes: &[u8],
+    save: impl FnOnce(&CardImage) -> Result<i64, UploadError>,
+) -> Result<i64, UploadError> {
     if bytes.len() > MAX_PHOTO_SIZE {
         return Err(UploadError::Invalid("Card image exceeds 25 MB."));
     }
@@ -240,16 +311,11 @@ pub fn upload(
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::hard_link(&temporary, &path)?;
-        let saved = (|| {
-            let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-            tx.execute(
-                "INSERT INTO cards (name, path, mime, sha256, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![name, filename, mime, hash, now],
-            )?;
-            let id = tx.last_insert_rowid();
-            tx.commit()?;
-            Ok::<_, UploadError>(id)
-        })();
+        let saved = save(&CardImage {
+            path: filename,
+            mime: mime.into(),
+            sha256: hash,
+        });
         if saved.is_err() {
             remove_upload_file(&path);
         }
@@ -283,6 +349,103 @@ pub mod tests {
             .write_to(&mut bytes, format)
             .unwrap();
         bytes.into_inner()
+    }
+
+    #[test]
+    fn back_is_optional_persistent_and_limited_to_one() {
+        let root = temp_dir();
+        let db_path = root.join("test.sqlite");
+        let mut conn = db::open(db_path.to_str().unwrap()).unwrap();
+        db::migrate(&mut conn).unwrap();
+        let front = image(image::ImageFormat::Png);
+        let back = image(image::ImageFormat::Jpeg);
+        let id = upload(&conn, &root, "Library", &front, 100).unwrap();
+        assert!(get_back(&conn, id).unwrap().is_none());
+        assert_eq!(upload_back(&conn, &root, id, &back, 101).unwrap(), id);
+        let count = fs::read_dir(&root).unwrap().count();
+        assert!(matches!(
+            upload_back(&conn, &root, id, &front, 102),
+            Err(UploadError::BackExists)
+        ));
+        assert!(matches!(
+            upload_back(&conn, &root, 999, &front, 102),
+            Err(UploadError::NotFound)
+        ));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), count);
+        drop(conn);
+        let conn = db::open(db_path.to_str().unwrap()).unwrap();
+        let card = get(&conn, id).unwrap().unwrap();
+        let saved_back = get_back(&conn, id).unwrap().unwrap();
+        assert_eq!(list(&conn).unwrap().len(), 1);
+        assert_eq!(fs::read(root.join(&card.path)).unwrap(), front);
+        assert_eq!(saved_back.mime, "image/jpeg");
+        assert_eq!(fs::read(root.join(&saved_back.path)).unwrap(), back);
+        assert!(delete(&conn, &root, id).unwrap());
+        assert!(get_back(&conn, id).unwrap().is_none());
+        assert!(!root.join(card.path).exists());
+        assert!(!root.join(saved_back.path).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn back_upload_rejects_bad_images_and_cleans_up_database_failures() {
+        let root = temp_dir();
+        let conn = db::open_memory();
+        let png = image(image::ImageFormat::Png);
+        let id = upload(&conn, &root, "Card", &png, 100).unwrap();
+        for bytes in [
+            b"%PDF-1.0".as_slice(),
+            &[0xff, 0xd8, 0xff],
+            &vec![0; MAX_PHOTO_SIZE + 1],
+        ] {
+            assert!(matches!(
+                upload_back(&conn, &root, id, bytes, 100),
+                Err(UploadError::Invalid(_))
+            ));
+        }
+        conn.execute_batch("CREATE TRIGGER fail_back BEFORE INSERT ON card_backs BEGIN SELECT RAISE(FAIL, 'test failure'); END;").unwrap();
+        assert!(matches!(
+            upload_back(&conn, &root, id, &png, 100),
+            Err(UploadError::Failed(_))
+        ));
+        assert!(get_back(&conn, id).unwrap().is_none());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_back_uploads_cannot_replace_each_other() {
+        let root = temp_dir();
+        let db_path = root.join("test.sqlite");
+        let mut conn = db::open(db_path.to_str().unwrap()).unwrap();
+        db::migrate(&mut conn).unwrap();
+        let png = image(image::ImageFormat::Png);
+        let id = upload(&conn, &root, "Card", &png, 100).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let db_path = db_path.clone();
+                let png = png.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let conn = db::open(db_path.to_str().unwrap()).unwrap();
+                    barrier.wait();
+                    upload_back(&conn, &root, id, &png, 100)
+                })
+            })
+            .collect();
+        let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(UploadError::BackExists)))
+                .count(),
+            1
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -401,6 +564,9 @@ pub mod tests {
         let id = upload(&writer, &root, "Card", &image(image::ImageFormat::Png), 100).unwrap();
         let card = get(&writer, id).unwrap().unwrap();
         let path = root.join(&card.path);
+        let back_bytes = image(image::ImageFormat::Jpeg);
+        upload_back(&writer, &root, id, &back_bytes, 101).unwrap();
+        let back_path = root.join(get_back(&writer, id).unwrap().unwrap().path);
         let reader = db::open(db_path.to_str().unwrap()).unwrap();
         let reader_tx =
             rusqlite::Transaction::new_unchecked(&reader, TransactionBehavior::Deferred).unwrap();
@@ -414,6 +580,8 @@ pub mod tests {
         assert!(delete(&writer, &root, id).is_err());
         assert_eq!(get(&writer, id).unwrap().unwrap().path, card.path);
         assert!(path.is_file());
+        assert_eq!(fs::read(&back_path).unwrap(), back_bytes);
+        assert!(get_back(&writer, id).unwrap().is_some());
         assert_eq!(
             fs::read_dir(&root)
                 .unwrap()
@@ -429,6 +597,25 @@ pub mod tests {
         drop(reader_tx);
         drop(reader);
         drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_validates_back_before_moving_front() {
+        let root = temp_dir();
+        let conn = db::open_memory();
+        let png = image(image::ImageFormat::Png);
+        let id = upload(&conn, &root, "Card", &png, 100).unwrap();
+        upload_back(&conn, &root, id, &png, 101).unwrap();
+        let front = root.join(get(&conn, id).unwrap().unwrap().path);
+        conn.execute(
+            "UPDATE card_backs SET path = '../outside.png' WHERE card_id = ?1",
+            [id],
+        )
+        .unwrap();
+        assert!(delete(&conn, &root, id).is_err());
+        assert_eq!(fs::read(front).unwrap(), png);
+        assert!(get(&conn, id).unwrap().is_some());
         fs::remove_dir_all(root).unwrap();
     }
 
