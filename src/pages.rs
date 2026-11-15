@@ -80,6 +80,8 @@ const ICON_PADDLE: &str = "<g transform=\"rotate(45 12 12)\">\
 const ICON_RECIPES: &str =
     "<path d=\"M6 13.9A4 4 0 0 1 7 6a5 5 0 0 1 10 0 4 4 0 0 1 1 7.9V20H6z\"/>\
     <path d=\"M6 17h12\"/>";
+// Heroicons pencil-square; license: public/static/heroicons-LICENSE.txt.
+const ICON_EDIT: &str = "<path stroke-width=\"1.5\" d=\"m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10\"/>";
 const ICON_PHOTOS: &str = "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/>\
     <circle cx=\"9\" cy=\"9\" r=\"2\"/><path d=\"m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21\"/>";
 const ICON_CARDS: &str = "<rect x=\"2\" y=\"4\" width=\"20\" height=\"16\" rx=\"2\"/>\
@@ -1061,13 +1063,13 @@ pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Optio
         "<p class=\"text-body-secondary mb-0\">No recipes yet.</p>".to_string()
     } else {
         format!(
-            "<ul class=\"list-unstyled mb-0\">{}</ul>",
+            "<ul class=\"list-group mb-0\">{}</ul>",
             recipes
                 .iter()
                 .map(|recipe| {
                     if recipe.archived {
                         format!(
-                            "<li class=\"d-flex gap-2 align-items-center mb-2\">\
+                            "<li class=\"list-group-item d-flex gap-2 align-items-center px-3 py-2\">\
                              <span class=\"flex-grow-1 text-body-secondary\">{}</span>\
                              <form method=\"post\" action=\"/recipes/{}/restore\">\
                              <button class=\"btn btn-outline-secondary\">Restore</button></form></li>",
@@ -1076,18 +1078,10 @@ pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Optio
                         )
                     } else {
                         format!(
-                            "<li class=\"d-flex gap-2 align-items-center mb-2\">\
-                             <a class=\"flex-grow-1\" href=\"/recipes/{}\">{}</a>\
-                             <form method=\"post\" action=\"/recipes/{}\" class=\"d-flex gap-2\">\
-                             <input class=\"form-control\" name=\"name\" value=\"{}\" aria-label=\"Recipe name\" required>\
-                             <button class=\"btn btn-outline-secondary\">Save</button></form>\
-                             <form method=\"post\" action=\"/recipes/{}/archive\">\
-                             <button class=\"btn btn-outline-secondary\">Archive</button></form></li>",
+                            "<li class=\"list-group-item p-0\">\
+                             <a class=\"list-group-item-action d-block px-3 py-3 text-decoration-none\" href=\"/recipes/{}\">{}</a></li>",
                             recipe.id,
                             esc(&recipe.name),
-                            recipe.id,
-                            esc(&recipe.name),
-                            recipe.id,
                         )
                     }
                 })
@@ -1100,10 +1094,10 @@ pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Optio
         user,
         features,
         &format!(
-            "{}{}<div class=\"card shadow-sm mb-4\"><div class=\"card-body\">{}\
-             <form method=\"post\" action=\"/recipes\" class=\"row g-2 align-items-center\">\
-             <div class=\"col\"><input class=\"form-control\" name=\"name\" placeholder=\"Recipe name\" aria-label=\"Recipe name\" required></div>\
-             <div class=\"col-auto\"><button class=\"btn btn-primary\">Add recipe</button></div></form></div></div>",
+            "<div class=\"d-flex justify-content-between align-items-start gap-3 flex-wrap\">\
+             {}<form method=\"post\" action=\"/recipes\" class=\"d-flex gap-2 align-items-center ms-auto\">\
+             <input class=\"form-control w-auto\" name=\"name\" placeholder=\"Recipe name\" aria-label=\"Recipe name\" required>\
+             <button class=\"btn btn-primary text-nowrap\">Add recipe</button></form></div>{}{}",
             page_title("Recipes"),
             alert(error),
             rows,
@@ -1116,6 +1110,7 @@ pub fn recipe_detail(
     features: Features,
     recipe: &RecipeDetail,
     editing: bool,
+    error: Option<&str>,
 ) -> String {
     if editing {
         let cancel = if recipe.content.trim().is_empty() {
@@ -1129,7 +1124,15 @@ pub fn recipe_detail(
             user,
             features,
             &format!(
-                "{}<div class=\"card shadow-sm\"><div class=\"card-body\">\
+                "{}{}<div class=\"card shadow-sm mb-3\"><div class=\"card-body\">\
+                 <div class=\"d-flex flex-wrap gap-3 align-items-end justify-content-between\">\
+                 <form method=\"post\" action=\"/recipes/{}\" class=\"d-flex flex-grow-1 gap-2 align-items-end\">\
+                 <div class=\"flex-grow-1\"><label class=\"form-label\" for=\"recipe-name\">Recipe name</label>\
+                 <input class=\"form-control\" id=\"recipe-name\" name=\"name\" value=\"{}\" required></div>\
+                 <button class=\"btn btn-outline-secondary text-nowrap\">Save name</button></form>\
+                 <form method=\"post\" action=\"/recipes/{}/archive\">\
+                 <button class=\"btn btn-outline-secondary\">Archive</button></form></div></div></div>\
+                 <div class=\"card shadow-sm\"><div class=\"card-body\">\
                  <form method=\"post\" action=\"/recipes/{}/content\">\
                  <label class=\"form-label\" for=\"recipe-content\">Recipe in Markdown</label>\
                  <textarea class=\"form-control font-monospace mb-3\" id=\"recipe-content\" \
@@ -1137,6 +1140,10 @@ pub fn recipe_detail(
                  <div class=\"d-flex gap-2 align-items-center\">\
                  <button class=\"btn btn-primary\">Save recipe</button>{cancel}</div></form></div></div>",
                 page_title(&recipe.name),
+                alert(error),
+                recipe.id,
+                esc(&recipe.name),
+                recipe.id,
                 recipe.id,
                 esc(&recipe.content),
             ),
@@ -1148,13 +1155,14 @@ pub fn recipe_detail(
             user,
             features,
             &format!(
-                "{}<article class=\"card shadow-sm\"><div class=\"card-body\">{}</div></article>\
-                 <div class=\"d-flex justify-content-between mt-3\">\
-                 <a href=\"/recipes\">&larr; All recipes</a>\
-                 <a href=\"/recipes/{}/edit\">Edit</a></div>",
+                "<div class=\"d-flex align-items-start gap-2\">{}\
+                 <a class=\"btn btn-outline-secondary btn-sm\" href=\"/recipes/{}/edit\" aria-label=\"Edit recipe\" title=\"Edit recipe\">{}</a></div>\
+                 <article class=\"card shadow-sm\"><div class=\"card-body\">{}</div></article>\
+                 <div class=\"mt-3\"><a href=\"/recipes\">&larr; All recipes</a></div>",
                 page_title(&recipe.name),
-                recipes::render_markdown(&recipe.content),
                 recipe.id,
+                icon(ICON_EDIT),
+                recipes::render_markdown(&recipe.content),
             ),
         )
     }
@@ -2038,11 +2046,13 @@ mod tests {
             },
         ];
         let html = recipes(&user(1, "mike", true), Features::default(), &data, None);
-        assert!(html.contains("value=\"Tomato &lt;soup&gt;\""));
-        assert!(!html.contains("value=\"Tomato <soup>\""));
+        assert!(html.contains("href=\"/recipes/7\">Tomato &lt;soup&gt;</a>"));
+        assert!(html.contains("list-group-item-action d-block px-3 py-3 text-decoration-none"));
+        assert!(!html.contains("value=\"Tomato"));
+        assert!(!html.contains("action=\"/recipes/7/archive\""));
+        assert!(html.find("page-title").unwrap() < html.find("action=\"/recipes\"").unwrap());
         assert!(html.contains("href=\"/recipes/7\""));
         assert!(html.contains("action=\"/recipes\""));
-        assert!(html.contains("action=\"/recipes/7/archive\""));
         assert!(html.contains("<span class=\"flex-grow-1 text-body-secondary\">Old soup</span>"));
         assert!(html.contains("action=\"/recipes/8/restore\""));
         assert!(html.contains("<button class=\"btn btn-outline-secondary\">Restore</button>"));
@@ -2059,14 +2069,22 @@ mod tests {
             archived: false,
             content: "## Ingredients\n\n- tomatoes <script>".into(),
         };
-        let view = recipe_detail(&user, Features::default(), &recipe, false);
+        let view = recipe_detail(&user, Features::default(), &recipe, false, None);
         assert!(view.contains("<h2>Ingredients</h2>"));
         assert!(view.contains("&lt;script&gt;"));
         assert!(!view.contains("<script>"));
-        assert!(view.contains("href=\"/recipes/7/edit\">Edit</a>"));
+        assert!(view.contains("href=\"/recipes/7/edit\" aria-label=\"Edit recipe\""));
+        let title_end = view.find("Tomato soup</h1>").unwrap();
+        let edit_icon = view.find("aria-label=\"Edit recipe\"").unwrap();
+        let article = view.find("<article").unwrap();
+        assert!(title_end < edit_icon && edit_icon < article);
+        assert!(view.contains("viewBox=\"0 0 24 24\""));
 
-        let edit = recipe_detail(&user, Features::default(), &recipe, true);
+        let edit = recipe_detail(&user, Features::default(), &recipe, true, None);
         assert!(edit.contains("action=\"/recipes/7/content\""));
+        assert!(edit.contains("action=\"/recipes/7\""));
+        assert!(edit.contains("name=\"name\" value=\"Tomato soup\""));
+        assert!(edit.contains("action=\"/recipes/7/archive\""));
         assert!(edit.contains("## Ingredients"));
         assert!(edit.contains("Cancel</a>"));
     }
