@@ -1,0 +1,5 @@
+.git
+.github/copilot/worktrees
+.claude/worktrees
+target
+dist
