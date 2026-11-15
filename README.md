@@ -18,7 +18,7 @@ Build and run the real app behind Apache with an isolated sample recipe and test
 bin/preview start
 ```
 
-Open the printed `http://127.0.0.1:8080/preview` URL. The preview uses fake SMTP settings, sends no email, and keeps its SQLite database in a Docker volume separate from production data. Set `WILLCROCK_PREVIEW_PORT` to choose a different localhost port (for example, `WILLCROCK_PREVIEW_PORT=8081 bin/preview start` if 8080 is occupied).
+Open the printed `http://127.0.0.1:3280/preview` URL. The preview uses fake SMTP settings, sends no email, and keeps its SQLite database in a Docker volume separate from production data. Set `WILLCROCK_PREVIEW_PORT` to choose a different localhost port (for example, `WILLCROCK_PREVIEW_PORT=3281 bin/preview start` if 3280 is occupied).
 
 `bin/preview stop` stops the app without deleting preview data; `bin/preview start` reuses it. Run `bin/preview clean` only when you want to delete the preview containers, network, and database volume. These commands target only the preview's Compose project.
 
