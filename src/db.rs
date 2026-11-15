@@ -210,6 +210,7 @@ CREATE TABLE card_backs (
   created_at INTEGER NOT NULL
 );
 ",
+    "ALTER TABLE recipes ADD COLUMN content TEXT NOT NULL DEFAULT '';",
 ];
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
@@ -256,13 +257,13 @@ mod tests {
     #[test]
     fn card_backs_migration_preserves_existing_fronts() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, MIGRATIONS.len() - 1).unwrap();
+        migrate_to(&mut conn, MIGRATIONS.len() - 2).unwrap();
         conn.execute(
             "INSERT INTO cards VALUES (7, 'Library', 'front.png', 'image/png', 'hash', 100)",
             [],
         )
         .unwrap();
-        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        assert_eq!(migrate(&mut conn).unwrap(), 2);
         assert_eq!(migrate(&mut conn).unwrap(), 0);
         let card = crate::cards::get(&conn, 7).unwrap().unwrap();
         assert_eq!(card.name, "Library");
@@ -279,6 +280,28 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn recipe_content_migration_preserves_existing_recipes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, MIGRATIONS.len() - 1).unwrap();
+        conn.execute(
+            "INSERT INTO recipes (name, archived_at) VALUES ('Tomato soup', 10)",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(migrate(&mut conn).unwrap(), 1);
+        let (content, archived_at): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT content, archived_at FROM recipes WHERE name = 'Tomato soup'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "");
+        assert_eq!(archived_at, Some(10));
     }
 
     #[test]

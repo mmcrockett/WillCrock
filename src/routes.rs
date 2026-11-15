@@ -722,11 +722,44 @@ fn recipes_route(
                     Err(error) => return page(400, Some(error)),
                 };
             match recipes::add(conn, &name) {
-                Ok(_) => Ok(Resp::redirect("/recipes")),
+                Ok(id) => Ok(Resp::redirect(&format!("/recipes/{id}"))),
                 Err(error) if is_constraint_violation(&error) => {
                     page(400, Some("A recipe with that name already exists."))
                 }
                 Err(error) => Err(error),
+            }
+        }
+        ("GET", [id]) | ("GET", [id, "edit"]) => {
+            let Ok(id) = id.parse::<i64>() else {
+                return not_found();
+            };
+            let Some(recipe) = recipes::detail(conn, id)? else {
+                return not_found();
+            };
+            if recipe.archived {
+                return not_found();
+            }
+            let editing = segs.len() == 2 || recipe.content.trim().is_empty();
+            Ok(Resp::html(
+                200,
+                pages::recipe_detail(user, feats, &recipe, editing),
+            ))
+        }
+        ("POST", [id, "content"]) => {
+            let Ok(id) = id.parse::<i64>() else {
+                return not_found();
+            };
+            let Some(recipe) = recipes::get(conn, id)? else {
+                return not_found();
+            };
+            if recipe.archived {
+                return not_found();
+            }
+            let content = req.form.get("content").map(String::as_str).unwrap_or("");
+            if recipes::update_content(conn, id, content)? == 1 {
+                Ok(Resp::redirect(&format!("/recipes/{id}")))
+            } else {
+                not_found()
             }
         }
         ("POST", [id]) => {
@@ -2050,10 +2083,12 @@ mod tests {
         assert_eq!(status, 200);
         assert!(html.contains("No recipes yet."));
 
-        assert_eq!(
-            call(&conn, &granted, "POST", "/recipes", "name=Tomato+soup").0,
-            303
-        );
+        let (status, response) = call(&conn, &granted, "POST", "/recipes", "name=Tomato+soup");
+        assert_eq!(status, 303);
+        assert!(response.contains("Location: /recipes/1"));
+        let (status, html) = call(&conn, &granted, "GET", "/recipes/1", "");
+        assert_eq!(status, 200);
+        assert!(html.contains("action=\"/recipes/1/content\""));
         let (status, html) = call(&conn, &granted, "POST", "/recipes", "name=tomato+soup");
         assert_eq!(status, 400);
         assert!(html.contains("A recipe with that name already exists."));
@@ -2061,10 +2096,30 @@ mod tests {
         let (status, html) = call(&conn, &granted, "GET", "/recipes", "");
         assert_eq!(status, 200);
         assert!(html.contains("value=\"Tomato soup\""));
+        assert!(html.contains("href=\"/recipes/1\""));
         let mut other = user(vec![Feature::Recipes]);
         other.id = 2;
         let (_, html) = call(&conn, &other, "GET", "/recipes", "");
         assert!(html.contains("value=\"Tomato soup\""));
+
+        assert_eq!(
+            call(
+                &conn,
+                &granted,
+                "POST",
+                "/recipes/1/content",
+                "content=%23%23+Ingredients%0A%0A-+tomatoes"
+            )
+            .0,
+            303
+        );
+        let (status, html) = call(&conn, &granted, "GET", "/recipes/1", "");
+        assert_eq!(status, 200);
+        assert!(html.contains("<h2>Ingredients</h2>"));
+        assert!(html.contains("<li>tomatoes</li>"));
+        assert!(html.contains("href=\"/recipes/1/edit\">Edit</a>"));
+        let (_, html) = call(&conn, &granted, "GET", "/recipes/1/edit", "");
+        assert!(html.contains("## Ingredients"));
 
         assert_eq!(
             call(&conn, &granted, "POST", "/recipes/1", "name=Roasted+soup").0,
@@ -2118,6 +2173,9 @@ mod tests {
         for (method, path, form) in [
             ("GET", "/recipes", ""),
             ("POST", "/recipes", "name=Denied"),
+            ("GET", "/recipes/1", ""),
+            ("GET", "/recipes/1/edit", ""),
+            ("POST", "/recipes/1/content", "content=Denied"),
             ("POST", "/recipes/1", "name=Denied"),
             ("POST", "/recipes/1/archive", ""),
             ("POST", "/recipes/1/restore", ""),

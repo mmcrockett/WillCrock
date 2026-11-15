@@ -4,7 +4,7 @@ use crate::config::Quackr;
 use crate::photos;
 use crate::pickle::dashboard::{self, Dashboard};
 use crate::pickle::{slots, time as pickle_time};
-use crate::recipes::Recipe;
+use crate::recipes::{self, Recipe, RecipeDetail};
 use crate::sms::{self, Sms};
 use crate::trips::{self, Item, Kind, Trip};
 
@@ -1077,11 +1077,14 @@ pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Optio
                     } else {
                         format!(
                             "<li class=\"d-flex gap-2 align-items-center mb-2\">\
-                             <form method=\"post\" action=\"/recipes/{}\" class=\"d-flex gap-2 flex-grow-1\">\
+                             <a class=\"flex-grow-1\" href=\"/recipes/{}\">{}</a>\
+                             <form method=\"post\" action=\"/recipes/{}\" class=\"d-flex gap-2\">\
                              <input class=\"form-control\" name=\"name\" value=\"{}\" aria-label=\"Recipe name\" required>\
                              <button class=\"btn btn-outline-secondary\">Save</button></form>\
                              <form method=\"post\" action=\"/recipes/{}/archive\">\
                              <button class=\"btn btn-outline-secondary\">Archive</button></form></li>",
+                            recipe.id,
+                            esc(&recipe.name),
                             recipe.id,
                             esc(&recipe.name),
                             recipe.id,
@@ -1106,6 +1109,55 @@ pub fn recipes(user: &User, features: Features, recipes: &[Recipe], error: Optio
             rows,
         ),
     )
+}
+
+pub fn recipe_detail(
+    user: &User,
+    features: Features,
+    recipe: &RecipeDetail,
+    editing: bool,
+) -> String {
+    if editing {
+        let cancel = if recipe.content.trim().is_empty() {
+            "<a href=\"/recipes\">&larr; All recipes</a>".to_string()
+        } else {
+            format!("<a href=\"/recipes/{}\">Cancel</a>", recipe.id)
+        };
+        app_page(
+            &recipe.name,
+            "recipes",
+            user,
+            features,
+            &format!(
+                "{}<div class=\"card shadow-sm\"><div class=\"card-body\">\
+                 <form method=\"post\" action=\"/recipes/{}/content\">\
+                 <label class=\"form-label\" for=\"recipe-content\">Recipe in Markdown</label>\
+                 <textarea class=\"form-control font-monospace mb-3\" id=\"recipe-content\" \
+                 name=\"content\" rows=\"20\" spellcheck=\"false\">{}</textarea>\
+                 <div class=\"d-flex gap-2 align-items-center\">\
+                 <button class=\"btn btn-primary\">Save recipe</button>{cancel}</div></form></div></div>",
+                page_title(&recipe.name),
+                recipe.id,
+                esc(&recipe.content),
+            ),
+        )
+    } else {
+        app_page(
+            &recipe.name,
+            "recipes",
+            user,
+            features,
+            &format!(
+                "{}<article class=\"card shadow-sm\"><div class=\"card-body\">{}</div></article>\
+                 <div class=\"d-flex justify-content-between mt-3\">\
+                 <a href=\"/recipes\">&larr; All recipes</a>\
+                 <a href=\"/recipes/{}/edit\">Edit</a></div>",
+                page_title(&recipe.name),
+                recipes::render_markdown(&recipe.content),
+                recipe.id,
+            ),
+        )
+    }
 }
 
 fn tag_links(tags: &[photos::TagCount], prefix: &str) -> String {
@@ -1988,6 +2040,7 @@ mod tests {
         let html = recipes(&user(1, "mike", true), Features::default(), &data, None);
         assert!(html.contains("value=\"Tomato &lt;soup&gt;\""));
         assert!(!html.contains("value=\"Tomato <soup>\""));
+        assert!(html.contains("href=\"/recipes/7\""));
         assert!(html.contains("action=\"/recipes\""));
         assert!(html.contains("action=\"/recipes/7/archive\""));
         assert!(html.contains("<span class=\"flex-grow-1 text-body-secondary\">Old soup</span>"));
@@ -1995,6 +2048,27 @@ mod tests {
         assert!(html.contains("<button class=\"btn btn-outline-secondary\">Restore</button>"));
         assert!(!html.contains("opacity-50"));
         assert!(!html.contains("Delete"));
+    }
+
+    #[test]
+    fn recipe_detail_switches_between_markdown_view_and_source_editor() {
+        let user = user(1, "mike", true);
+        let recipe = RecipeDetail {
+            id: 7,
+            name: "Tomato soup".into(),
+            archived: false,
+            content: "## Ingredients\n\n- tomatoes <script>".into(),
+        };
+        let view = recipe_detail(&user, Features::default(), &recipe, false);
+        assert!(view.contains("<h2>Ingredients</h2>"));
+        assert!(view.contains("&lt;script&gt;"));
+        assert!(!view.contains("<script>"));
+        assert!(view.contains("href=\"/recipes/7/edit\">Edit</a>"));
+
+        let edit = recipe_detail(&user, Features::default(), &recipe, true);
+        assert!(edit.contains("action=\"/recipes/7/content\""));
+        assert!(edit.contains("## Ingredients"));
+        assert!(edit.contains("Cancel</a>"));
     }
 
     fn sample_trip() -> Trip {

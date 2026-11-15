@@ -6,6 +6,13 @@ pub struct Recipe {
     pub archived: bool,
 }
 
+pub struct RecipeDetail {
+    pub id: i64,
+    pub name: String,
+    pub archived: bool,
+    pub content: String,
+}
+
 pub fn parse_name(name: &str) -> Result<String, &'static str> {
     let name = name.trim();
     if name.is_empty() {
@@ -44,6 +51,22 @@ pub fn get(conn: &Connection, id: i64) -> rusqlite::Result<Option<Recipe>> {
     .optional()
 }
 
+pub fn detail(conn: &Connection, id: i64) -> rusqlite::Result<Option<RecipeDetail>> {
+    conn.query_row(
+        "SELECT id, name, archived_at, content FROM recipes WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(RecipeDetail {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                archived: r.get::<_, Option<i64>>(2)?.is_some(),
+                content: r.get(3)?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub fn add(conn: &Connection, name: &str) -> rusqlite::Result<i64> {
     conn.execute("INSERT INTO recipes (name) VALUES (?1)", [name])?;
     Ok(conn.last_insert_rowid())
@@ -53,6 +76,13 @@ pub fn rename(conn: &Connection, id: i64, name: &str) -> rusqlite::Result<usize>
     conn.execute(
         "UPDATE recipes SET name = ?1 WHERE id = ?2",
         params![name, id],
+    )
+}
+
+pub fn update_content(conn: &Connection, id: i64, content: &str) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE recipes SET content = ?1 WHERE id = ?2",
+        params![content, id],
     )
 }
 
@@ -66,6 +96,18 @@ pub fn set_archived(
         "UPDATE recipes SET archived_at = ?1 WHERE id = ?2",
         params![archived.then_some(now), id],
     )
+}
+
+pub fn render_markdown(markdown: &str) -> String {
+    use pulldown_cmark::{html, Event, Parser};
+
+    let parser = Parser::new(markdown).map(|event| match event {
+        Event::Html(html) | Event::InlineHtml(html) => Event::Text(html),
+        event => event,
+    });
+    let mut rendered = String::new();
+    html::push_html(&mut rendered, parser);
+    ammonia::clean(&rendered)
 }
 
 #[cfg(test)]
@@ -133,5 +175,33 @@ mod tests {
         assert!(add(&conn, "tomato SOUP").is_err());
         let pasta = add(&conn, "Pasta").unwrap();
         assert!(rename(&conn, pasta, "TOMATO SOUP").is_err());
+    }
+
+    #[test]
+    fn recipe_content_is_persisted() {
+        let conn = open_memory();
+        let soup = add(&conn, "Tomato soup").unwrap();
+
+        assert_eq!(detail(&conn, soup).unwrap().unwrap().content, "");
+        assert_eq!(
+            update_content(&conn, soup, "## Ingredients\n- tomatoes").unwrap(),
+            1
+        );
+        assert_eq!(
+            detail(&conn, soup).unwrap().unwrap().content,
+            "## Ingredients\n- tomatoes"
+        );
+    }
+
+    #[test]
+    fn markdown_renders_formatting_without_raw_html_or_unsafe_links() {
+        let rendered = render_markdown(
+            "# Soup\n\n**Hot** <script>alert(1)</script> [click](javascript:alert(1))",
+        );
+
+        assert!(rendered.contains("<h1>Soup</h1>"));
+        assert!(rendered.contains("<strong>Hot</strong>"));
+        assert!(!rendered.contains("<script>"));
+        assert!(!rendered.contains("javascript:"));
     }
 }
