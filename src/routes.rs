@@ -742,7 +742,7 @@ fn recipes_route(
             let editing = segs.len() == 2 || recipe.content.trim().is_empty();
             Ok(Resp::html(
                 200,
-                pages::recipe_detail(user, feats, &recipe, editing),
+                pages::recipe_detail(user, feats, &recipe, editing, None),
             ))
         }
         ("POST", [id, "content"]) => {
@@ -766,7 +766,7 @@ fn recipes_route(
             let Ok(id) = id.parse::<i64>() else {
                 return not_found();
             };
-            let Some(recipe) = recipes::get(conn, id)? else {
+            let Some(recipe) = recipes::detail(conn, id)? else {
                 return not_found();
             };
             if recipe.archived {
@@ -775,14 +775,26 @@ fn recipes_route(
             let name =
                 match recipes::parse_name(req.form.get("name").map(String::as_str).unwrap_or("")) {
                     Ok(name) => name,
-                    Err(error) => return page(400, Some(error)),
+                    Err(error) => {
+                        return Ok(Resp::html(
+                            400,
+                            pages::recipe_detail(user, feats, &recipe, true, Some(error)),
+                        ));
+                    }
                 };
             match recipes::rename(conn, id, &name) {
-                Ok(1) => Ok(Resp::redirect("/recipes")),
+                Ok(1) => Ok(Resp::redirect(&format!("/recipes/{id}/edit"))),
                 Ok(_) => not_found(),
-                Err(error) if is_constraint_violation(&error) => {
-                    page(400, Some("A recipe with that name already exists."))
-                }
+                Err(error) if is_constraint_violation(&error) => Ok(Resp::html(
+                    400,
+                    pages::recipe_detail(
+                        user,
+                        feats,
+                        &recipe,
+                        true,
+                        Some("A recipe with that name already exists."),
+                    ),
+                )),
                 Err(error) => Err(error),
             }
         }
@@ -2088,6 +2100,8 @@ mod tests {
         assert!(response.contains("Location: /recipes/1"));
         let (status, html) = call(&conn, &granted, "GET", "/recipes/1", "");
         assert_eq!(status, 200);
+        assert!(html.contains("name=\"name\" value=\"Tomato soup\""));
+        assert!(html.contains("action=\"/recipes/1/archive\""));
         assert!(html.contains("action=\"/recipes/1/content\""));
         let (status, html) = call(&conn, &granted, "POST", "/recipes", "name=tomato+soup");
         assert_eq!(status, 400);
@@ -2095,12 +2109,14 @@ mod tests {
 
         let (status, html) = call(&conn, &granted, "GET", "/recipes", "");
         assert_eq!(status, 200);
-        assert!(html.contains("value=\"Tomato soup\""));
+        assert!(html.contains("href=\"/recipes/1\">Tomato soup</a>"));
+        assert!(!html.contains("value=\"Tomato soup\""));
         assert!(html.contains("href=\"/recipes/1\""));
         let mut other = user(vec![Feature::Recipes]);
         other.id = 2;
         let (_, html) = call(&conn, &other, "GET", "/recipes", "");
-        assert!(html.contains("value=\"Tomato soup\""));
+        assert!(html.contains("href=\"/recipes/1\">Tomato soup</a>"));
+        assert!(!html.contains("value=\"Tomato soup\""));
 
         assert_eq!(
             call(
@@ -2117,16 +2133,32 @@ mod tests {
         assert_eq!(status, 200);
         assert!(html.contains("<h2>Ingredients</h2>"));
         assert!(html.contains("<li>tomatoes</li>"));
-        assert!(html.contains("href=\"/recipes/1/edit\">Edit</a>"));
+        assert!(html.contains("href=\"/recipes/1/edit\" aria-label=\"Edit recipe\""));
         let (_, html) = call(&conn, &granted, "GET", "/recipes/1/edit", "");
         assert!(html.contains("## Ingredients"));
 
         assert_eq!(
-            call(&conn, &granted, "POST", "/recipes/1", "name=Roasted+soup").0,
+            call(&conn, &granted, "POST", "/recipes", "name=Fresh+soup").0,
             303
         );
+        let (status, html) = call(&conn, &granted, "POST", "/recipes/1", "name=Fresh+soup");
+        assert_eq!(status, 400);
+        assert!(html.contains("A recipe with that name already exists."));
+        assert!(html.contains("action=\"/recipes/1/content\""));
+        assert!(html.contains("name=\"name\" value=\"Tomato soup\""));
+        let (status, html) = call(&conn, &granted, "POST", "/recipes/1", "name=+");
+        assert_eq!(status, 400);
+        assert!(html.contains("Recipe name is required."));
+        assert!(html.contains("action=\"/recipes/1/content\""));
+
+        let (status, response) = call(&conn, &granted, "POST", "/recipes/1", "name=Roasted+soup");
+        assert_eq!(status, 303);
+        assert!(response.contains("Location: /recipes/1/edit"));
+        let (_, html) = call(&conn, &granted, "GET", "/recipes/1/edit", "");
+        assert!(html.contains("name=\"name\" value=\"Roasted soup\""));
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
-        assert!(html.contains("value=\"Roasted soup\""));
+        assert!(html.contains("href=\"/recipes/1\">Roasted soup</a>"));
+        assert!(!html.contains("value=\"Roasted soup\""));
         assert_eq!(
             call(&conn, &granted, "POST", "/recipes/1/archive", "").0,
             303
@@ -2137,12 +2169,8 @@ mod tests {
             html.contains("<span class=\"flex-grow-1 text-body-secondary\">Roasted soup</span>")
         );
 
-        assert_eq!(
-            call(&conn, &granted, "POST", "/recipes", "name=Fresh+soup").0,
-            303
-        );
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
-        assert!(html.find("value=\"Fresh soup\"").unwrap() < html.find("Roasted soup").unwrap());
+        assert!(html.find("Fresh soup").unwrap() < html.find("Roasted soup").unwrap());
 
         assert_eq!(
             call(&conn, &granted, "POST", "/recipes/1", "name=Changed+soup").0,
@@ -2157,10 +2185,7 @@ mod tests {
             404
         );
         let (_, html) = call(&conn, &granted, "GET", "/recipes", "");
-        assert!(
-            html.find("value=\"Fresh soup\"").unwrap()
-                < html.find("value=\"Roasted soup\"").unwrap()
-        );
+        assert!(html.find("Fresh soup").unwrap() < html.find("Roasted soup").unwrap());
         assert!(!html.contains("Delete"));
     }
 

@@ -1,0 +1,27 @@
+FROM rust:latest AS build
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        apache2 libapache2-mod-fcgid sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app/target/release/willcrock /usr/local/bin/willcrock.fcgi
+COPY public /app/public
+COPY docker/preview/apache-site.conf /etc/apache2/sites-available/willcrock-preview.conf
+COPY docker/preview/willcrock-preview.toml /etc/willcrock-preview.toml
+COPY docker/preview/entrypoint.sh /usr/local/bin/willcrock-preview-entrypoint
+
+RUN chmod 755 /usr/local/bin/willcrock.fcgi /usr/local/bin/willcrock-preview-entrypoint \
+    && a2dissite 000-default \
+    && a2enmod fcgid headers rewrite setenvif \
+    && a2ensite willcrock-preview
+
+EXPOSE 80
+ENTRYPOINT ["/usr/local/bin/willcrock-preview-entrypoint"]

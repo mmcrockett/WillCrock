@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+port="${WILLCROCK_PREVIEW_PORT:-3280}"
+
+case "$port" in
+  ''|*[!0-9]*)
+    echo "WILLCROCK_PREVIEW_PORT must be a port number" >&2
+    exit 2
+    ;;
+esac
+port=$((10#$port))
+if ((port < 1 || port > 65535)); then
+  echo "WILLCROCK_PREVIEW_PORT must be between 1 and 65535" >&2
+  exit 2
+fi
+export WILLCROCK_PREVIEW_PORT="$port"
+
+compose=(docker compose --project-name willcrock-preview \
+  --file "$root/compose.preview.yaml" --project-directory "$root")
+base_url="http://127.0.0.1:$port"
+
+usage() {
+  echo "usage: bin/preview [start|status|stop|clean]" >&2
+  exit 2
+}
+
+wait_for_preview() {
+  local tmpdir attempt
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' RETURN
+
+  for ((attempt = 0; attempt < 30; attempt++)); do
+    if curl -fsS --max-time 2 "$base_url/static/site.css" -o /dev/null 2>/dev/null \
+      && curl -fsSL --max-time 3 -c "$tmpdir/cookies" "$base_url/preview" \
+        -o "$tmpdir/recipes" 2>/dev/null \
+      && grep -Fq 'Preview user' "$tmpdir/recipes"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  "${compose[@]}" logs --tail 80 >&2 || true
+  echo "preview did not become ready at $base_url; inspect the logs above" >&2
+  return 1
+}
+
+action="${1:-start}"
+if (($# > 0)); then
+  shift
+fi
+(($# == 0)) || usage
+
+case "$action" in
+  start)
+    if ! "${compose[@]}" up -d --build; then
+      echo "preview failed to start; check Docker and whether port $port is already in use" >&2
+      exit 1
+    fi
+    wait_for_preview
+    printf 'Recipe preview ready: %s/preview\n' "$base_url"
+    ;;
+  status)
+    "${compose[@]}" ps
+    ;;
+  stop)
+    "${compose[@]}" stop
+    ;;
+  clean)
+    "${compose[@]}" down --volumes
+    ;;
+  *)
+    usage
+    ;;
+esac

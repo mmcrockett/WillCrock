@@ -1,0 +1,7 @@
+db_path = "/var/lib/willcrock-preview/preview.sqlite3"
+
+[smtp]
+host = "127.0.0.1"
+username = "preview"
+password = "preview"
+from = "preview@example.test"
