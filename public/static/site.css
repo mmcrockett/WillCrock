@@ -329,9 +329,19 @@ body {
 }
 
 .sms-phone {
+  --bs-btn-color: var(--crest-navy);
+  --bs-btn-border-color: var(--crest-navy);
+  --bs-btn-hover-bg: var(--crest-navy);
+  --bs-btn-hover-border-color: var(--crest-navy);
+  --bs-btn-active-bg: var(--crest-navy-dark);
+  --bs-btn-active-border-color: var(--crest-navy-dark);
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+.sms-phone [data-copy-label]:empty {
+  display: none;
 }
 
 .sms-older {

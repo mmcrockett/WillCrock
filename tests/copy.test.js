@@ -31,15 +31,15 @@ test("copy reports success only after writing and restores the original label", 
   const ui = setup((value) => {
     copied = value;
     return new Promise((resolve) => { finish = resolve; });
-  }, "Copy");
+  }, "");
   const pending = ui.click();
   assert.equal(copied, "15551234567");
-  assert.equal(ui.label.textContent, "Copy");
+  assert.equal(ui.label.textContent, "");
   finish();
   await pending;
   assert.equal(ui.label.textContent, "Copied");
   ui.expire();
-  assert.equal(ui.label.textContent, "Copy");
+  assert.equal(ui.label.textContent, "");
 });
 
 test("copy failures are visible and code labels are restored", async () => {
