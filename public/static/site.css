@@ -328,6 +328,26 @@ body {
   white-space: pre-wrap;
 }
 
+.sms-phone {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sms-older {
+  background-color: #efefef;
+  color: #495057;
+}
+
+.sms-older .sms-code {
+  --bs-btn-bg: #59636d;
+  --bs-btn-border-color: #59636d;
+  --bs-btn-hover-bg: #424a52;
+  --bs-btn-hover-border-color: #424a52;
+  --bs-btn-active-bg: #343a40;
+  --bs-btn-active-border-color: #343a40;
+}
+
 .sms-code {
   font-size: 1.6rem;
   font-weight: 600;

@@ -1,4 +1,5 @@
 use crate::config::Quackr;
+use jiff::Timestamp;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -14,7 +15,16 @@ const TIME_FIELDS: [&str; 6] = [
 pub struct Sms {
     pub sender: String,
     pub time: String,
+    pub received_at: Option<Timestamp>,
     pub text: String,
+}
+
+impl Sms {
+    pub fn is_older_than_day(&self, now: Timestamp) -> bool {
+        self.received_at.is_some_and(|received| {
+            now.as_nanosecond() - received.as_nanosecond() > 86_400_000_000_000
+        })
+    }
 }
 
 pub fn fetch(q: &Quackr) -> Result<Vec<Sms>, String> {
@@ -40,10 +50,25 @@ fn parse_messages(body: &Value) -> Option<Vec<Sms>> {
                     .map(|f| str_field(m, f))
                     .find(|t| !t.is_empty())
                     .unwrap_or_default(),
+                received_at: TIME_FIELDS
+                    .iter()
+                    .find_map(|f| parse_timestamp(&str_field(m, f))),
                 text: str_field(m, "message"),
             })
             .collect(),
     )
+}
+
+fn parse_timestamp(value: &str) -> Option<Timestamp> {
+    if value.bytes().all(|b| b.is_ascii_digit()) {
+        let n = value.parse().ok()?;
+        return match value.len() {
+            10 => Timestamp::from_second(n).ok(),
+            13 => Timestamp::from_millisecond(n).ok(),
+            _ => None,
+        };
+    }
+    value.parse().ok()
 }
 
 fn str_field(m: &Value, key: &str) -> String {
@@ -163,7 +188,33 @@ mod tests {
             ("Bank", "Oct 1", "hi")
         );
         assert_eq!(msgs[1].time, "1700000000");
+        assert_eq!(msgs[1].received_at.unwrap().as_second(), 1700000000);
         assert_eq!((msgs[2].sender.as_str(), msgs[2].time.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn message_age_uses_unambiguous_timestamps_and_fallback_fields() {
+        let body = json!({"data": {"messages": [
+            {"date": "2026-11-22T11:59:59Z"},
+            {"date": "2026-11-22T12:00:00Z"},
+            {"date": "2026-11-23T12:00:01Z"},
+            {"date": "2026-11-22 11:00:00"},
+            {"date": "not a date", "received_at": 1795348799},
+            {"timestamp": "1795348799000"},
+            {"date": "2026-11-22T06:59:59-05:00"},
+            {"date": ""},
+            {"timestamp": "123"},
+        ]}});
+        let msgs = parse_messages(&body).unwrap();
+        let now: Timestamp = "2026-11-23T12:00:00Z".parse().unwrap();
+        assert_eq!(
+            msgs.iter()
+                .map(|m| m.is_older_than_day(now))
+                .collect::<Vec<_>>(),
+            [true, false, false, false, true, true, true, false, false]
+        );
+        assert_eq!(msgs[4].time, "not a date");
+        assert!(msgs[3].received_at.is_none());
     }
 
     #[test]

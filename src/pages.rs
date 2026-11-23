@@ -89,6 +89,8 @@ const ICON_CARDS: &str = "<rect x=\"2\" y=\"4\" width=\"20\" height=\"16\" rx=\"
 const ICON_TRIPS: &str = "<path d=\"M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0z\"/>\
     <circle cx=\"12\" cy=\"10\" r=\"3\"/>";
 const ICON_MENU: &str = "<path d=\"M4 6h16M4 12h16M4 18h16\"/>";
+const ICON_COPY: &str = "<rect x=\"8\" y=\"8\" width=\"12\" height=\"12\" rx=\"2\"/>\
+    <path d=\"M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2\"/>";
 
 fn icon(paths: &str) -> String {
     format!(
@@ -521,10 +523,11 @@ pub fn sms(user: &User, features: Features, quackr: &Quackr, messages: Option<&[
     let notice = |text: &str| {
         format!("<div class=\"card shadow-sm\"><div class=\"card-body\">{text}</div></div>")
     };
+    let now = jiff::Timestamp::now();
     let cards = match messages {
         None => notice("Could not load messages."),
         Some([]) => notice("No messages."),
-        Some(list) => list.iter().map(sms_card).collect(),
+        Some(list) => list.iter().map(|m| sms_card(m, now)).collect(),
     };
     app_page(
         "SMS",
@@ -534,33 +537,40 @@ pub fn sms(user: &User, features: Features, quackr: &Quackr, messages: Option<&[
         &format!(
             "<div class=\"d-flex align-items-baseline justify-content-between gap-3\">{title}\
              <a href=\"/sms\">Refresh</a></div>\
-             <p><button type=\"button\" class=\"btn btn-link p-0\" data-copy=\"{raw}\">{shown}</button></p>\
+             <p><button type=\"button\" class=\"btn btn-outline-secondary sms-phone\" data-copy=\"{raw}\">\
+             <span>{shown}</span>{copy_icon}<span data-copy-label aria-live=\"polite\">Copy</span></button></p>\
              {cards}\
              <script src=\"{js}\" defer></script>",
             title = page_title("SMS"),
             raw = esc(&quackr.phone_number),
             shown = esc(&sms::format_phone(&quackr.phone_number)),
+            copy_icon = icon(ICON_COPY),
             js = asset("/static/copy.js"),
         ),
     )
 }
 
-fn sms_card(m: &Sms) -> String {
+fn sms_card(m: &Sms, now: jiff::Timestamp) -> String {
     let code = sms::extract_code(&m.text)
         .map(|c| {
             format!(
                 "<button type=\"button\" class=\"btn btn-primary btn-lg w-100 mt-2 sms-code\" \
-                 data-copy=\"{}\">{}</button>",
+                 data-copy=\"{}\"><span data-copy-label aria-live=\"polite\">{}</span></button>",
                 esc(&c.chars().filter(char::is_ascii_digit).collect::<String>()),
                 esc(&c)
             )
         })
         .unwrap_or_default();
     format!(
-        "<div class=\"card shadow-sm mb-3\"><div class=\"card-body\">\
+        "<div class=\"card shadow-sm mb-3{}\"><div class=\"card-body\">\
          <div class=\"d-flex justify-content-between gap-2 small text-body-secondary mb-1\">\
          <span>{}</span><span>{}</span></div>\
          <div class=\"sms-body\">{}</div>{code}</div></div>",
+        if m.is_older_than_day(now) {
+            " sms-older"
+        } else {
+            ""
+        },
         esc(&m.sender),
         esc(&m.time),
         esc(&m.text),
@@ -1623,6 +1633,7 @@ mod tests {
         Sms {
             sender: "Bank".into(),
             time: "Oct 1".into(),
+            received_at: None,
             text: text.into(),
         }
     }
@@ -1666,6 +1677,8 @@ mod tests {
         assert!(html.contains("side-link active\" href=\"/sms\""));
         assert!(html.contains("(555) 123-4567"));
         assert!(html.contains("data-copy=\"15551234567\""));
+        assert!(html.contains("class=\"btn btn-outline-secondary sms-phone\""));
+        assert!(html.contains("data-copy-label aria-live=\"polite\">Copy</span>"));
         assert!(html.contains("/static/copy.js?v="));
         assert!(html.contains("No messages."));
         assert!(!html.contains("secret"));
@@ -1682,7 +1695,20 @@ mod tests {
         let list = [msg("Your code is 123-456"), msg("see you soon")];
         let html = sms(&user(1, "mike", true), sms_on(), &quackr(), Some(&list));
         assert_eq!(html.matches("sms-code").count(), 1);
-        assert!(html.contains("data-copy=\"123456\">123-456</button>"));
+        assert!(html.contains("data-copy=\"123456\"><span data-copy-label aria-live=\"polite\">123-456</span></button>"));
+    }
+
+    #[test]
+    fn sms_cards_mute_only_old_messages_without_reordering() {
+        let now: jiff::Timestamp = "2026-11-23T12:00:00Z".parse().unwrap();
+        let mut old = msg("old 123456");
+        old.received_at = Some("2026-11-22T11:59:59Z".parse().unwrap());
+        let mut recent = msg("recent");
+        recent.received_at = Some("2026-11-22T12:00:00Z".parse().unwrap());
+        let html = [sms_card(&old, now), sms_card(&recent, now)].concat();
+        assert_eq!(html.matches("sms-older").count(), 1);
+        assert!(html.find("old 123456").unwrap() < html.find("recent").unwrap());
+        assert!(html.contains("data-copy=\"123456\""));
     }
 
     #[test]
