@@ -537,8 +537,9 @@ pub fn sms(user: &User, features: Features, quackr: &Quackr, messages: Option<&[
         &format!(
             "<div class=\"d-flex align-items-baseline justify-content-between gap-3\">{title}\
              <a href=\"/sms\">Refresh</a></div>\
-             <p><button type=\"button\" class=\"btn btn-outline-secondary sms-phone\" data-copy=\"{raw}\">\
-             <span>{shown}</span>{copy_icon}<span data-copy-label aria-live=\"polite\">Copy</span></button></p>\
+             <p><button type=\"button\" class=\"btn btn-outline-primary sms-phone\" data-copy=\"{raw}\" \
+             aria-label=\"Copy phone number {shown}\">\
+             <span>{shown}</span>{copy_icon}<span data-copy-label aria-live=\"polite\"></span></button></p>\
              {cards}\
              <script src=\"{js}\" defer></script>",
             title = page_title("SMS"),
@@ -1677,8 +1678,9 @@ mod tests {
         assert!(html.contains("side-link active\" href=\"/sms\""));
         assert!(html.contains("(555) 123-4567"));
         assert!(html.contains("data-copy=\"15551234567\""));
-        assert!(html.contains("class=\"btn btn-outline-secondary sms-phone\""));
-        assert!(html.contains("data-copy-label aria-live=\"polite\">Copy</span>"));
+        assert!(html.contains("class=\"btn btn-outline-primary sms-phone\""));
+        assert!(html.contains("aria-label=\"Copy phone number (555) 123-4567\""));
+        assert!(html.contains("data-copy-label aria-live=\"polite\"></span>"));
         assert!(html.contains("/static/copy.js?v="));
         assert!(html.contains("No messages."));
         assert!(!html.contains("secret"));

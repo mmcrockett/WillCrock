@@ -50,9 +50,15 @@ fn parse_messages(body: &Value) -> Option<Vec<Sms>> {
                     .map(|f| str_field(m, f))
                     .find(|t| !t.is_empty())
                     .unwrap_or_default(),
-                received_at: TIME_FIELDS
-                    .iter()
-                    .find_map(|f| parse_timestamp(&str_field(m, f))),
+                received_at: str_field(m, "received")
+                    .parse()
+                    .ok()
+                    .and_then(|ms| Timestamp::from_millisecond(ms).ok())
+                    .or_else(|| {
+                        TIME_FIELDS
+                            .iter()
+                            .find_map(|f| parse_timestamp(&str_field(m, f)))
+                    }),
                 text: str_field(m, "message"),
             })
             .collect(),
@@ -215,6 +221,26 @@ mod tests {
         );
         assert_eq!(msgs[4].time, "not a date");
         assert!(msgs[3].received_at.is_none());
+    }
+
+    #[test]
+    fn quackr_received_milliseconds_determine_age() {
+        let body = json!({"data": {"messages": [
+            {"received": 1795348799999_i64, "message": "old"},
+            {"received": "1795348800000", "message": "boundary"},
+            {"received": 1795435200001_i64, "message": "future"},
+            {"received": "invalid", "date": "2026-11-22T11:59:59Z"},
+            {"received": null}
+        ]}});
+        let msgs = parse_messages(&body).unwrap();
+        let now: Timestamp = "2026-11-23T12:00:00Z".parse().unwrap();
+        assert_eq!(
+            msgs.iter()
+                .map(|m| m.is_older_than_day(now))
+                .collect::<Vec<_>>(),
+            [true, false, false, true, false]
+        );
+        assert_eq!(msgs[0].time, "");
     }
 
     #[test]
